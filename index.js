@@ -12,9 +12,9 @@ let pagado = false;
 let ultimoId = '';
 
 // Acceso a Mercado Pago
-const ACCESS_TOKEN = 'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // ⬅️ tu access token de prueba o real
+const ACCESS_TOKEN = 'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // ⬅️ tu access token real
 const PREFERENCIA_BASE = {
-  title: 'Pinta Fresca',
+  title: '500cm³ Cerveza Blonde',
   quantity: 1,
   currency_id: 'ARS',
   unit_price: 100
@@ -46,10 +46,9 @@ app.get('/nuevo-link', async (req, res) => {
 app.get('/estado', async (req, res) => {
   res.json({ pagado });
 
-  // Si ya se pagó, restablecer y generar nuevo link
+  // Si ya se pagó, restablecer la bandera (NO generar nuevo link acá)
   if (pagado) {
     pagado = false;
-    linkPago = await generarNuevoLink();
   }
 });
 
@@ -75,6 +74,13 @@ app.post('/ipn', async (req, res) => {
     if (estado === 'approved') {
       pagado = true;
       console.log('✅ Pago confirmado');
+
+      // Esperar 15 segundos antes de generar nuevo link
+      console.log('⏳ Esperando 15 segundos para generar nuevo link...');
+      setTimeout(async () => {
+        linkPago = await generarNuevoLink();
+        console.log('🔄 Nuevo link generado (con delay)');
+      }, 15000);
     }
 
     res.sendStatus(200);
