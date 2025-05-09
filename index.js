@@ -1,48 +1,91 @@
 const express = require("express");
-const cors = require("cors");
 const bodyParser = require("body-parser");
-
+const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(bodyParser.json());
-
 let estadoPago = false;
-let linkActual = "https://mpago.la/2CH2hxR"; // tu link de ejemplo inicial
+let linkActual = "";
 
-app.get("/", (req, res) => {
-  res.send("Servidor de Mercado Pago corriendo...");
-});
+const ACCESS_TOKEN = "TEST-4699237534437950-100119-ac22e3f3c10b5b87d08f8da9ea426da1-153083685";
 
-// 👉 Ruta para generar un nuevo link de pago
+// Genera un link de pago con monto fijo ($100)
+async function generarNuevoLink() {
+  const body = {
+    items: [
+      {
+        title: "Cerveza tirada",
+        quantity: 1,
+        unit_price: 100,
+        currency_id: "ARS",
+      },
+    ],
+    notification_url: "https://mp-server-c1mg.onrender.com/ipn",
+  };
+
+  const response = await fetch("https://api.mercadopago.com/checkout/preferences", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${ACCESS_TOKEN}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const data = await response.json();
+  return data.init_point;
+}
+
+// Middleware
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// Crear el primer link al iniciar
+(async () => {
+  linkActual = await generarNuevoLink();
+})();
+
+// Ruta para el ESP8266: obtener el QR actual
 app.get("/nuevo-link", (req, res) => {
-  // Aquí podrías integrar Mercado Pago para generar un nuevo link dinámico.
-  // Por ahora respondemos con uno fijo.
   res.json({ link: linkActual });
 });
 
-// 👉 Ruta IPN (notificación de pago de Mercado Pago)
-app.post("/ipn", (req, res) => {
-  console.log("💰 IPN recibido:", req.body);
+// Ruta para el ESP8266: verificar si ya se pagó
+app.get("/estado", (req, res) => {
+  res.json({ pagado: estadoPago });
+});
 
-  // Lógica simple: cuando Mercado Pago notifique, marcamos como pagado.
-  estadoPago = true;
+// Ruta IPN: Mercado Pago avisa que hubo un pago
+app.post("/ipn", async (req, res) => {
+  const paymentId = req.query["data.id"];
+  const topic = req.query["type"];
+
+  if (topic === "payment") {
+    const url = `https://api.mercadopago.com/v1/payments/${paymentId}`;
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+      },
+    });
+
+    const data = await response.json();
+
+    if (data.status === "approved") {
+      estadoPago = true;
+      console.log("✅ Pago confirmado");
+
+      // Espera unos segundos y genera un nuevo link
+      setTimeout(async () => {
+        estadoPago = false;
+        linkActual = await generarNuevoLink();
+        console.log("🔄 Nuevo link generado");
+      }, 12000); // después del contador del ESP8266 (10 seg + margen)
+    }
+  }
 
   res.sendStatus(200);
 });
 
-// 👉 Ruta para que el ESP verifique el estado del pago
-app.get("/estado", (req, res) => {
-  res.json({ pagado: estadoPago });
-
-  // Reset después de notificar al ESP
-  if (estadoPago) {
-    console.log("🔁 Reiniciando estado...");
-    estadoPago = false;
-  }
-});
-
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+  console.log(`Servidor escuchando en puerto ${PORT}`);
 });
