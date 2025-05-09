@@ -1,91 +1,94 @@
-const express = require("express");
-const bodyParser = require("body-parser");
-const fetch = require("node-fetch");
+const express = require('express');
+const axios = require('axios');
+const bodyParser = require('body-parser');
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-let estadoPago = false;
-let linkActual = "";
+app.use(bodyParser.json());
 
-const ACCESS_TOKEN = "APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685";
+// Variables globales
+let linkPago = '';
+let pagado = false;
+let ultimoId = '';
 
-// Genera un link de pago con monto fijo ($100)
+// Acceso a Mercado Pago
+const ACCESS_TOKEN = 'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // ⬅️ tu access token de prueba o real
+const PREFERENCIA_BASE = {
+  title: 'Pinta Fresca',
+  quantity: 1,
+  currency_id: 'ARS',
+  unit_price: 100
+};
+
+// Genera un nuevo link de pago
 async function generarNuevoLink() {
-  const body = {
-    items: [
-      {
-        title: "Cerveza tirada",
-        quantity: 1,
-        unit_price: 100,
-        currency_id: "ARS",
-      },
-    ],
-    notification_url: "https://mp-server-c1mg.onrender.com/ipn",
-  };
+  try {
+    const res = await axios.post(
+      'https://api.mercadopago.com/checkout/preferences',
+      { items: [PREFERENCIA_BASE] },
+      { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+    );
 
-  const response = await fetch("https://api.mercadopago.com/checkout/preferences", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${ACCESS_TOKEN}`,
-    },
-    body: JSON.stringify(body),
-  });
-
-  const data = await response.json();
-  return data.init_point;
+    const nuevoLink = res.data.init_point;
+    console.log('🔄 Nuevo link generado');
+    return nuevoLink;
+  } catch (error) {
+    console.error('❌ Error al generar nuevo link:', error.response?.data || error.message);
+    return '';
+  }
 }
 
-// Middleware
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+// Ruta para el ESP8266
+app.get('/nuevo-link', async (req, res) => {
+  res.json({ link: linkPago });
+});
 
-// Crear el primer link al iniciar
+app.get('/estado', async (req, res) => {
+  res.json({ pagado });
+
+  // Si ya se pagó, restablecer y generar nuevo link
+  if (pagado) {
+    pagado = false;
+    linkPago = await generarNuevoLink();
+  }
+});
+
+// IPN de Mercado Pago
+app.post('/ipn', async (req, res) => {
+  const id = req.query['id'] || req.body['data']?.id;
+  const topic = req.query['topic'] || req.body['type'];
+
+  if (topic !== 'payment') return res.sendStatus(200);
+  if (!id || id === ultimoId) return res.sendStatus(200); // Evita duplicados
+  ultimoId = id;
+
+  try {
+    const response = await axios.get(
+      `https://api.mercadopago.com/v1/payments/${id}`,
+      { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+    );
+
+    const estado = response.data.status;
+    const emailComprador = response.data.payer?.email;
+    console.log('📩 Pago recibido:', estado, emailComprador);
+
+    if (estado === 'approved') {
+      pagado = true;
+      console.log('✅ Pago confirmado');
+    }
+
+    res.sendStatus(200);
+  } catch (error) {
+    console.error('❌ Error al consultar pago:', error.response?.data || error.message);
+    res.sendStatus(500);
+  }
+});
+
+// Inicializa el link la primera vez
 (async () => {
-  linkActual = await generarNuevoLink();
+  linkPago = await generarNuevoLink();
 })();
 
-// Ruta para el ESP8266: obtener el QR actual
-app.get("/nuevo-link", (req, res) => {
-  res.json({ link: linkActual });
-});
-
-// Ruta para el ESP8266: verificar si ya se pagó
-app.get("/estado", (req, res) => {
-  res.json({ pagado: estadoPago });
-});
-
-// Ruta IPN: Mercado Pago avisa que hubo un pago
-app.post("/ipn", async (req, res) => {
-  const paymentId = req.query["data.id"];
-  const topic = req.query["type"];
-
-  if (topic === "payment") {
-    const url = `https://api.mercadopago.com/v1/payments/${paymentId}`;
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${ACCESS_TOKEN}`,
-      },
-    });
-
-    const data = await response.json();
-
-    if (data.status === "approved") {
-      estadoPago = true;
-      console.log("✅ Pago confirmado");
-
-      // Espera unos segundos y genera un nuevo link
-      setTimeout(async () => {
-        estadoPago = false;
-        linkActual = await generarNuevoLink();
-        console.log("🔄 Nuevo link generado");
-      }, 12000); // después del contador del ESP8266 (10 seg + margen)
-    }
-  }
-
-  res.sendStatus(200);
-});
-
 app.listen(PORT, () => {
-  console.log(`Servidor escuchando en puerto ${PORT}`);
+  console.log(`Servidor activo en http://localhost:${PORT}`);
 });
