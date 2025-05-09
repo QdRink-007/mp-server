@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 3000;
 let estadoPago = false;
 let linkActual = "";
 
-const ACCESS_TOKEN = "TEST-4699237534437950-100119-ac22e3f3c10b5b87d08f8da9ea426da1-153083685";
+const ACCESS_TOKEN = "APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685";
 
 // Genera un link de pago con monto fijo ($100)
 async function generarNuevoLink() {
