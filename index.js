@@ -90,3 +90,7 @@ app.get('/ipn', async (req, res) => {
 // Inicia el servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+
+app.get("/", (req, res) => {
+  res.send("Servidor de Mercado Pago corriendo...");
+});
