@@ -6,21 +6,19 @@ const PORT = process.env.PORT || 10000;
 
 app.use(bodyParser.json());
 
-// Variables globales
 let linkPago = '';
 let pagado = false;
 let ultimoId = '';
 
-// Acceso a Mercado Pago
-const ACCESS_TOKEN = 'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // ⬅️ tu access token real
+const ACCESS_TOKEN = 'APP_USR-...'; // ⚠️ Tu token real de producción
 const PREFERENCIA_BASE = {
-  title: '500cm³ Cerveza Blonde',
+  title: 'Pinta Fresca',
   quantity: 1,
   currency_id: 'ARS',
   unit_price: 100
 };
 
-// Genera un nuevo link de pago
+// 🔁 Generar link
 async function generarNuevoLink() {
   try {
     const res = await axios.post(
@@ -28,7 +26,6 @@ async function generarNuevoLink() {
       { items: [PREFERENCIA_BASE] },
       { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
     );
-
     const nuevoLink = res.data.init_point;
     console.log('🔄 Nuevo link generado');
     return nuevoLink;
@@ -38,27 +35,24 @@ async function generarNuevoLink() {
   }
 }
 
-// Ruta para el ESP8266
+// 🧠 ESP pide link actual
 app.get('/nuevo-link', async (req, res) => {
   res.json({ link: linkPago });
 });
 
+// ESP verifica si hubo pago
 app.get('/estado', async (req, res) => {
   res.json({ pagado });
-
-  // Si ya se pagó, restablecer la bandera (NO generar nuevo link acá)
-  if (pagado) {
-    pagado = false;
-  }
+  if (pagado) pagado = false; // Reset
 });
 
-// IPN de Mercado Pago
+// 📨 Mercado Pago notifica
 app.post('/ipn', async (req, res) => {
-  const id = req.query['id'] || req.body['data']?.id;
-  const topic = req.query['topic'] || req.body['type'];
+  const id = req.query['id'] || req.body?.data?.id;
+  const topic = req.query['topic'] || req.body?.type;
 
   if (topic !== 'payment') return res.sendStatus(200);
-  if (!id || id === ultimoId) return res.sendStatus(200); // Evita duplicados
+  if (!id || id === ultimoId) return res.sendStatus(200);
   ultimoId = id;
 
   try {
@@ -68,19 +62,21 @@ app.post('/ipn', async (req, res) => {
     );
 
     const estado = response.data.status;
-    const emailComprador = response.data.payer?.email;
-    console.log('📩 Pago recibido:', estado, emailComprador);
+    const email = response.data.payer?.email || 'sin email';
+    console.log('📩 Pago recibido:', estado, email);
 
     if (estado === 'approved') {
       pagado = true;
       console.log('✅ Pago confirmado');
 
-      // Esperar 15 segundos antes de generar nuevo link
-      console.log('⏳ Esperando 15 segundos para generar nuevo link...');
+      // Esperar un tiempo antes de generar nuevo link
       setTimeout(async () => {
-        linkPago = await generarNuevoLink();
-        console.log('🔄 Nuevo link generado (con delay)');
-      }, 15000);
+        const nuevo = await generarNuevoLink();
+        if (nuevo) {
+          linkPago = nuevo;
+          console.log('🔄 Nuevo link generado (con delay)');
+        }
+      }, 10000); // Esperar 10 segundos
     }
 
     res.sendStatus(200);
@@ -90,7 +86,7 @@ app.post('/ipn', async (req, res) => {
   }
 });
 
-// Inicializa el link la primera vez
+// Inicial
 (async () => {
   linkPago = await generarNuevoLink();
 })();
