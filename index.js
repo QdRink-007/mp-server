@@ -12,7 +12,7 @@ let ultimoId = '';
 
 const ACCESS_TOKEN = 'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // ⚠️ Tu token real de producción
 const PREFERENCIA_BASE = {
-  title: 'Pinta Fresca',
+  title: 'Pinta Frescas',
   quantity: 1,
   currency_id: 'ARS',
   unit_price: 100
