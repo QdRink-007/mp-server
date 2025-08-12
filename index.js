@@ -9,10 +9,11 @@ app.use(bodyParser.json());
 let linkPago = '';
 let pagado = false;
 let ultimoId = '';
+let ultimaPreferencia = ''; // NUEVO: guardamos el preference_id generado
 
 const ACCESS_TOKEN = 'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // ⚠️ Tu token real de producción
 const PREFERENCIA_BASE = {
-  title: 'Pinta Frescas',
+  title: 'Pinta',
   quantity: 1,
   currency_id: 'ARS',
   unit_price: 100
@@ -27,7 +28,8 @@ async function generarNuevoLink() {
       { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
     );
     const nuevoLink = res.data.init_point;
-    console.log('🔄 Nuevo link generado');
+    ultimaPreferencia = res.data.id; // NUEVO: guardar preference_id
+    console.log('🔄 Nuevo link generado:', ultimaPreferencia);
     return nuevoLink;
   } catch (error) {
     console.error('❌ Error al generar nuevo link:', error.response?.data || error.message);
@@ -43,7 +45,7 @@ app.get('/nuevo-link', async (req, res) => {
 // ESP verifica si hubo pago
 app.get('/estado', async (req, res) => {
   res.json({ pagado });
-  if (pagado) pagado = false; // Reset
+  if (pagado) pagado = false;
 });
 
 // 📨 Mercado Pago notifica
@@ -62,21 +64,30 @@ app.post('/ipn', async (req, res) => {
     );
 
     const estado = response.data.status;
+    const preference_id = response.data.preference_id;
     const email = response.data.payer?.email || 'sin email';
+
     console.log('📩 Pago recibido:', estado, email);
+    console.log('🔎 preference_id del pago:', preference_id);
+    console.log('🔐 preference_id esperado:', ultimaPreferencia);
 
-    if (estado === 'approved') {
+    if (estado === 'approved' && preference_id === ultimaPreferencia) {
       pagado = true;
-      console.log('✅ Pago confirmado');
+      console.log('✅ Pago confirmado y válido');
+      const logMsg = `🕒 Fecha y hora: ${new Date().toLocaleString()} | Pago de: ${email} | Estado: ${estado}\n`;
+      console.log(logMsg);
+      const fs = require('fs');
+      fs.appendFileSync('pagos.log', logMsg);
 
-      // Esperar un tiempo antes de generar nuevo link
       setTimeout(async () => {
         const nuevo = await generarNuevoLink();
         if (nuevo) {
           linkPago = nuevo;
           console.log('🔄 Nuevo link generado (con delay)');
         }
-      }, 10000); // Esperar 10 segundos
+      }, 10000);
+    } else {
+      console.log('⚠️ Pago aprobado pero no corresponde al QR actual');
     }
 
     res.sendStatus(200);
