@@ -17,8 +17,8 @@ const ACCESS_TOKEN = process.env.ACCESS_TOKEN || 'APP_USR-6603583526397159-04281
 // Whitelist de dispositivos y títulos por dev
 const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3'];
 const ITEM_BY_DEV = {
-  bar1: { title: 'Pinta Rubia', quantity: 1, currency_id: 'ARS', unit_price: 1000 },
-  bar2: { title: 'Pinta Negra', quantity: 1, currency_id: 'ARS', unit_price: 1000 },
+  bar1: { title: 'Pinta Rubia', quantity: 1, currency_id: 'ARS', unit_price: 100 },
+  bar2: { title: 'Pinta Negra', quantity: 1, currency_id: 'ARS', unit_price: 110 },
   bar3: { title: 'Pinta Roja',  quantity: 1, currency_id: 'ARS', unit_price: 1000 }
 };
 
