@@ -23,7 +23,7 @@ const ITEM_BY_DEV = {
 };
 
 // Estado por-dispositivo
-// devices[devId] = { linkPago, pagado, ultimaPreferencia, ultimaReferencia, ultimoIdNotificado }
+// devices[devId] = { linkPago, pagado, ultimaPreferencia, ultimaReferencia, ultimoIdNotificado, refsUsadas:Set, prefsUsadas:Set }
 const devices = Object.create(null);
 
 // Indexes inversos para mapear pagos → dev
@@ -42,7 +42,10 @@ function ensureDev(devId) {
       pagado: false,
       ultimaPreferencia: '',
       ultimaReferencia: '',
-      ultimoIdNotificado: ''
+      ultimoIdNotificado: '',
+      // ⬇️ Agregado anti-QR usado
+      refsUsadas: new Set(),
+      prefsUsadas: new Set()
     };
   }
   return devices[devId];
@@ -62,6 +65,9 @@ async function generarNuevoLink(devId) {
       items: [item],
       external_reference: extRef,
       // binary_mode: true, // opcional: fuerza aprobado/rechazado (sin "pending" largos)
+      // expires: true,
+      // expiration_date_from: new Date().toISOString(),
+      // expiration_date_to:   new Date(Date.now() + 3*60*1000).toISOString(), // 3 min
     };
     const res = await axios.post(
       'https://api.mercadopago.com/checkout/preferences',
@@ -165,14 +171,20 @@ app.post('/ipn', async (req, res) => {
     }
     const dev = ensureDev(devId);
 
-    // Anti-duplicado a nivel dev
+    // Anti-duplicado a nivel dev (mismo payment_id)
     if (dev.ultimoIdNotificado === id) {
       log('ℹ️ Webhook duplicado', { dev: devId, id });
       return res.sendStatus(200);
     }
     dev.ultimoIdNotificado = id;
 
-    // Validación robusta: aceptamos prefId o extRef si coincide con lo vigente
+    // ⬇️ Agregado: RECHAZAR QR ya usado (extRef o pref ya consumidos)
+    if ((extRef && dev.refsUsadas.has(extRef)) || (prefId && dev.prefsUsadas.has(prefId))) {
+      log('🚫 Pago con QR ya usado', { dev: devId, prefId, extRef });
+      return res.sendStatus(200);
+    }
+
+    // Validación: aceptar solo si coincide con lo VIGENTE
     const coincide =
       (prefId && dev.ultimaPreferencia && prefId === dev.ultimaPreferencia) ||
       (extRef && dev.ultimaReferencia  && extRef === dev.ultimaReferencia);
@@ -181,10 +193,20 @@ app.post('/ipn', async (req, res) => {
       dev.pagado = true;
       log('✅ Pago confirmado', { dev: devId });
 
-      // Regenerar SOLO el link de este dev en 10s (invalida el QR usado)
+      // Marcar inmediatamente la pref/ref vigente como USADA para que no vuelva a entrar
+      if (dev.ultimaReferencia)   dev.refsUsadas.add(dev.ultimaReferencia);
+      if (dev.ultimaPreferencia)  dev.prefsUsadas.add(dev.ultimaPreferencia);
+
+      // Invalido YA lo vigente para cortar coincidencias en los próximos segundos
+      const viejaPref = dev.ultimaPreferencia;
+      const viejaRef  = dev.ultimaReferencia;
+      dev.ultimaPreferencia = '';
+      dev.ultimaReferencia  = '';
+
+      // Regenerar SOLO el link de este dev en 10s (podés poner 0 si querés instantáneo)
       setTimeout(async () => {
         await generarNuevoLink(devId);
-        log('🔄 Nuevo link post-aprobacion', { dev: devId });
+        log('🔄 Nuevo link post-aprobacion', { dev: devId, oldPref: viejaPref, oldRef: viejaRef });
       }, 10000);
     } else {
       log('⚠️ Pago aprobado pero no coincide con preferencia/referencia vigente', {
