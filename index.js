@@ -1,4 +1,4 @@
-// index.js (multi-dispositivo fijo: bar1, bar2, bar3)
+// index.js – cola de eventos + sin spam y rotación configurable
 // ─────────────────────────────────────────────────────────
 const express = require('express');
 const axios = require('axios');
@@ -6,15 +6,16 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Parsers para webhooks MP (acepta JSON y x-www-form-urlencoded)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ⚠️ Configurá tu token en variables de entorno de Render:
-// KEY: ACCESS_TOKEN, VALUE: APP_USR-xxxxx...
+// ⚠️ Configurá tu token de MP en env var ACCESS_TOKEN
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN || 'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // ⚠️ Tu token real de producción
 
-// Dispositivos habilitados e ítems por dev
+// ⏱️ Delay para rotar QR luego de aprobar pago (ms)
+const ROTATE_DELAY_MS = Number(process.env.ROTATE_DELAY_MS || 20000); // 20 s por defecto
+
+// Dispositivos e items
 const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3'];
 const ITEM_BY_DEV = {
   bar1: { title: 'Pinta Rubia', quantity: 1, currency_id: 'ARS', unit_price: 100 },
@@ -22,18 +23,13 @@ const ITEM_BY_DEV = {
   bar3: { title: 'Pinta Roja',  quantity: 1, currency_id: 'ARS', unit_price: 1000 }
 };
 
-// Estado por dispositivo
-// devices[devId] = {
-//   linkPago, ultimaPreferencia, ultimaReferencia, ultimoIdNotificado,
-//   queue: [{ref, pref, ts}], // eventos pendientes de “pagado”
-// }
+// Estado por device
+// devices[dev] = { linkPago, ultimaPreferencia, ultimaReferencia, ultimoIdNotificado, queue: [{ref,pref,ts}] }
 const devices = Object.create(null);
+const prefIndex = Object.create(null); // prefId → dev
+const refIndex  = Object.create(null); // external_reference → dev
 
-// Índices inversos para mapear pagos → dev
-const prefIndex = Object.create(null);   // prefId → devId
-const refIndex  = Object.create(null);   // external_reference → devId
-
-const log = (...args) => console.log(new Date().toISOString(), ...args);
+const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 function ensureDev(devId) {
   if (!devId) throw new Error('missing dev');
@@ -42,7 +38,7 @@ function ensureDev(devId) {
     devices[devId] = {
       linkPago: '',
       ultimaPreferencia: '',
-      ultimaReferencia: '',
+      ultimaReferencia:  '',
       ultimoIdNotificado: '',
       queue: []
     };
@@ -55,30 +51,24 @@ async function generarNuevoLink(devId) {
   const item = ITEM_BY_DEV[devId];
   if (!item) throw new Error('no item for dev');
 
-  const extRef = `${devId}:${Date.now()}`;  // ref única robusta
+  const extRef = `${devId}:${Date.now()}`;
 
   try {
-    const payload = {
-      items: [item],
-      external_reference: extRef,
-      // binary_mode: true, // si querés forzar aprobación inmediata (sin pending)
-    };
-    const res = await axios.post(
+    const payload = { items: [item], external_reference: extRef /*, binary_mode: true*/ };
+    const r = await axios.post(
       'https://api.mercadopago.com/checkout/preferences',
       payload,
       { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
     );
 
-    const link = res.data.init_point || res.data.sandbox_init_point || '';
-    const pref = res.data.id || '';
+    const link = r.data.init_point || r.data.sandbox_init_point || '';
+    const pref = r.data.id || '';
 
-    // Actualizamos estado vigente
     dev.linkPago = link;
     dev.ultimaPreferencia = pref;
     dev.ultimaReferencia  = extRef;
 
-    // Reindexar
-    if (pref)  prefIndex[pref]  = devId;
+    if (pref)   prefIndex[pref] = devId;
     if (extRef) refIndex[extRef] = devId;
 
     log('🔄 Preferencia creada', { dev: devId, pref, extRef, title: item.title, price: item.unit_price });
@@ -89,9 +79,9 @@ async function generarNuevoLink(devId) {
   }
 }
 
-// ─────────────── Rutas para ESP ───────────────
+// ─────────── Rutas para el ESP ───────────
 
-// Devuelve un link (reusa o crea si falta)
+// Devuelve link vigente (o crea si falta)
 app.get('/nuevo-link', async (req, res) => {
   const devId = req.query.dev;
   try {
@@ -104,60 +94,52 @@ app.get('/nuevo-link', async (req, res) => {
   }
 });
 
-// Devuelve un evento pendiente (si hay), y lo consume (POP)
+// Devuelve 1 evento pendiente (si hay) y lo consume
 app.get('/estado', (req, res) => {
   const devId = req.query.dev;
   try {
     const dev = ensureDev(devId);
-
     if (dev.queue.length > 0) {
-      const ev = dev.queue.shift(); // consume un evento
+      const ev = dev.queue.shift();
       log('📤 /estado → pagado:true', { dev: devId, ref: ev.ref, pref: ev.pref, restantes: dev.queue.length });
       return res.json({ pagado: true, ref: ev.ref, pref: ev.pref });
-    } else {
-      log('📤 /estado → pagado:false', { dev: devId });
-      return res.json({ pagado: false });
     }
+    // No spam: no logueamos pagado:false para cada poll
+    return res.json({ pagado: false });
   } catch (e) {
     log('❌ /estado error', e.message);
     return res.json({ pagado: false });
   }
 });
 
-// Salud
+// Salud y diagnóstico
 app.get('/health', (_req, res) => res.status(200).send('ok'));
-
-// Debug: estado por-dev (NO expongas en producción pública)
 app.get('/debug', (_req, res) => {
-  const snapshot = {};
+  const snap = {};
   for (const devId of ALLOWED_DEVS) {
     const d = devices[devId] || {};
-    snapshot[devId] = {
+    snap[devId] = {
       ultimaPreferencia: d.ultimaPreferencia || '',
-      ultimaReferencia:  d.ultimaReferencia || '',
+      ultimaReferencia:  d.ultimaReferencia  || '',
       queueLen: (d.queue || []).length,
-      linkShort: (d.linkPago || '').slice(0, 60) + (d.linkPago && d.linkPago.length > 60 ? '…' : '')
+      linkShort: (d.linkPago || '').slice(0, 70)
     };
   }
-  res.json(snapshot);
+  res.json(snap);
 });
 
-// ─────────────── Webhook de MP ───────────────
+// ─────────── Webhook de MP ───────────
 app.post('/ipn', async (req, res) => {
   try {
-    const id    = req.query.id    || req.body?.data?.id;  // v1/v2
+    const id    = req.query.id    || req.body?.data?.id;
     const topic = req.query.topic || req.body?.type;
 
-    if (topic !== 'payment') {
-      log('ℹ️ Webhook ignorado (topic)', topic);
-      return res.sendStatus(200);
-    }
+    if (topic !== 'payment') return res.sendStatus(200);
     if (!id) {
       log('⚠️ Webhook sin id de pago');
       return res.sendStatus(200);
     }
 
-    // Consultar pago a MP
     const r = await axios.get(
       `https://api.mercadopago.com/v1/payments/${id}`,
       { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
@@ -169,7 +151,7 @@ app.post('/ipn', async (req, res) => {
     const extRef = data.external_reference || '';
     const email  = data.payer?.email || 'sin email';
 
-    // Mapear dev (por external_reference o preference_id)
+    // Mapear dev
     let devId = null;
     if (extRef && refIndex[extRef])      devId = refIndex[extRef];
     else if (prefId && prefIndex[prefId]) devId = prefIndex[prefId];
@@ -180,44 +162,30 @@ app.post('/ipn', async (req, res) => {
 
     log('📩 Pago recibido', { id, estado, email, prefId, extRef, devId });
 
-    if (!devId) {
-      log('⚠️ No se pudo mapear el pago a un dispositivo');
-      return res.sendStatus(200);
-    }
+    if (!devId) return res.sendStatus(200);
     const dev = ensureDev(devId);
 
-    // Anti-duplicados por id de pago
-    if (dev.ultimoIdNotificado === id) {
-      log('ℹ️ Webhook duplicado', { dev: devId, id });
-      return res.sendStatus(200);
-    }
+    // Anti-duplicado
+    if (dev.ultimoIdNotificado === id) return res.sendStatus(200);
     dev.ultimoIdNotificado = id;
 
-    // ¿Coincide con lo vigente?
     const coincide =
       (prefId && dev.ultimaPreferencia && prefId === dev.ultimaPreferencia) ||
       (extRef && dev.ultimaReferencia  && extRef === dev.ultimaReferencia);
 
     if (estado === 'approved' && coincide) {
-      // Encolar evento de pago para el ESP
-      dev.queue.push({
-        ref: dev.ultimaReferencia,
-        pref: dev.ultimaPreferencia,
-        ts: Date.now()
-      });
-      log('✅ Pago confirmado → evento encolado', {
-        dev: devId, queueLen: dev.queue.length
-      });
+      // Encolar evento
+      dev.queue.push({ ref: dev.ultimaReferencia, pref: dev.ultimaPreferencia, ts: Date.now() });
+      log('✅ Pago confirmado → evento encolado', { dev: devId, queueLen: dev.queue.length });
 
-      // Regenerar el link (invalidar QR usado)
+      // Rotar QR luego de un margen (para que el ESP termine y pida el nuevo link)
       setTimeout(async () => {
         const oldPref = dev.ultimaPreferencia;
         const oldRef  = dev.ultimaReferencia;
         await generarNuevoLink(devId);
-        log('🔄 Nuevo link post-aprobación', { dev: devId, oldPref, oldRef });
-      }, 8000); // podés subir/bajar este delay
+        log('🔄 Nuevo enlace post-aprobación', { dev: devId, oldPref, oldRef });
+      }, ROTATE_DELAY_MS);
     } else if (estado === 'approved' && !coincide) {
-      // Pago aprobado pero por un QR ya reemplazado → ignorar
       log('🚫 Pago con QR ya usado', { dev: devId, prefId, extRef });
     } else {
       log('ℹ️ Pago no aprobado (estado)', { dev: devId, estado });
@@ -226,13 +194,12 @@ app.post('/ipn', async (req, res) => {
     return res.sendStatus(200);
   } catch (e) {
     log('❌ Error en /ipn', e.response?.data || e.message);
-    // Igual 200 para que MP no reintente agresivo
     return res.sendStatus(200);
   }
 });
 
-// ─────────────── Arranque ───────────────
+// ─────────── Arranque ───────────
 app.listen(PORT, () => {
   log(`Servidor activo en http://localhost:${PORT}`);
-  log('URL pública de Render lista (usá /nuevo-link?dev=bar1|bar2|bar3).');
+  log('URL pública Render: usa /nuevo-link?dev=bar1|bar2|bar3');
 });
