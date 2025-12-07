@@ -1,205 +1,344 @@
-// index.js – cola de eventos + sin spam y rotación configurable
-// ─────────────────────────────────────────────────────────
+// index.js – Servidor QdRink multi-BAR (modo PRODUCCION mp-server)
+
 const express = require('express');
 const axios = require('axios');
+const bodyParser = require('body-parser');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// ================== CONFIG ==================
 
-// ⚠️ Configurá tu token de MP en env var ACCESS_TOKEN
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN || 'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // ⚠️ Tu token real de producción
+const ACCESS_TOKEN =
+  process.env.MP_ACCESS_TOKEN ||
+  'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685';
 
-// ⏱️ Delay para rotar QR luego de aprobar pago (ms)
-const ROTATE_DELAY_MS = Number(process.env.ROTATE_DELAY_MS || 20000); // 20 s por defecto
+const ROTATE_DELAY_MS = Number(process.env.ROTATE_DELAY_MS || 5000); // 5 s
+const WEBHOOK_URL =
+  process.env.WEBHOOK_URL || 'https://mp-server-c1mg.onrender.com/ipn';
 
-// Dispositivos e items
 const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3'];
+
 const ITEM_BY_DEV = {
   bar1: { title: 'Pinta Rubia', quantity: 1, currency_id: 'ARS', unit_price: 100 },
   bar2: { title: 'Pinta Negra', quantity: 1, currency_id: 'ARS', unit_price: 110 },
-  bar3: { title: 'Pinta Roja',  quantity: 1, currency_id: 'ARS', unit_price: 1000 }
+  bar3: { title: 'Pinta Roja',  quantity: 1, currency_id: 'ARS', unit_price: 120 },
 };
 
-// Estado por device
-// devices[dev] = { linkPago, ultimaPreferencia, ultimaReferencia, ultimoIdNotificado, queue: [{ref,pref,ts}] }
-const devices = Object.create(null);
-const prefIndex = Object.create(null); // prefId → dev
-const refIndex  = Object.create(null); // external_reference → dev
+// Estado por dispositivo
+const stateByDev = {};
+ALLOWED_DEVS.forEach((dev) => {
+  stateByDev[dev] = {
+    pagado: false,
+    ultimaPreferencia: null,
+    linkActual: null,
+    rotateScheduled: false, // 👈 nuevo: evita rotaciones duplicadas
+  };
+});
 
-const log = (...a) => console.log(new Date().toISOString(), ...a);
+// Historial de pagos + set de pagos ya procesados
+const pagos = [];
+const processedPayments = new Set();
 
-function ensureDev(devId) {
-  if (!devId) throw new Error('missing dev');
-  if (!ALLOWED_DEVS.includes(devId)) throw new Error('invalid dev');
-  if (!devices[devId]) {
-    devices[devId] = {
-      linkPago: '',
-      ultimaPreferencia: '',
-      ultimaReferencia:  '',
-      ultimoIdNotificado: '',
-      queue: []
-    };
-  }
-  return devices[devId];
+// ================== MIDDLEWARE ==================
+
+app.use(bodyParser.json());
+
+// ================== HELPERS MP ==================
+
+async function generarNuevoLinkParaDev(dev) {
+  const item = ITEM_BY_DEV[dev];
+  if (!item) throw new Error(`Item no definido para dev=${dev}`);
+
+  const headers = { Authorization: `Bearer ${ACCESS_TOKEN}` };
+
+  const body = {
+    items: [item],
+    external_reference: dev, // identifica al BAR
+    notification_url: WEBHOOK_URL,
+  };
+
+  const res = await axios.post(
+    'https://api.mercadopago.com/checkout/preferences',
+    body,
+    { headers },
+  );
+
+  const pref = res.data;
+  const prefId = pref.id || pref.preference_id;
+
+  stateByDev[dev].ultimaPreferencia = prefId;
+  stateByDev[dev].linkActual = pref.init_point;
+
+  console.log(`🔄 Nuevo link generado para ${dev}:`, {
+    preference_id: prefId,
+    link: pref.init_point,
+  });
+
+  return {
+    preference_id: prefId,
+    link: pref.init_point,
+  };
 }
 
-async function generarNuevoLink(devId) {
-  const dev = ensureDev(devId);
-  const item = ITEM_BY_DEV[devId];
-  if (!item) throw new Error('no item for dev');
+function recargarLinkConReintento(dev, intento = 1) {
+  const MAX_INTENTOS = 5;
+  const esperaMs = 2000 * intento;
 
-  const extRef = `${devId}:${Date.now()}`;
-
-  try {
-    const payload = { items: [item], external_reference: extRef /*, binary_mode: true*/ };
-    const r = await axios.post(
-      'https://api.mercadopago.com/checkout/preferences',
-      payload,
-      { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+  generarNuevoLinkParaDev(dev).catch((err) => {
+    console.error(
+      `❌ Error al regenerar link para ${dev} (intento ${intento}):`,
+      err.response?.data || err.message,
     );
 
-    const link = r.data.init_point || r.data.sandbox_init_point || '';
-    const pref = r.data.id || '';
-
-    dev.linkPago = link;
-    dev.ultimaPreferencia = pref;
-    dev.ultimaReferencia  = extRef;
-
-    if (pref)   prefIndex[pref] = devId;
-    if (extRef) refIndex[extRef] = devId;
-
-    log('🔄 Preferencia creada', { dev: devId, pref, extRef, title: item.title, price: item.unit_price });
-    return link;
-  } catch (e) {
-    log('❌ Error al generar preferencia', e.response?.data || e.message);
-    return '';
-  }
+    if (intento < MAX_INTENTOS) {
+      console.log(
+        `⏳ Reintentando generar link para ${dev} en ${esperaMs} ms...`,
+      );
+      setTimeout(() => recargarLinkConReintento(dev, intento + 1), esperaMs);
+    } else {
+      console.log(
+        `⚠️ Se agotaron los reintentos para ${dev}, se mantiene el último link válido.`,
+      );
+    }
+  });
 }
 
-// ─────────── Rutas para el ESP ───────────
+// ================== RUTAS PRINCIPALES ==================
 
-// Devuelve link vigente (o crea si falta)
+app.get('/', (req, res) => {
+  res.send('Servidor QdRink mp-server OK');
+});
+
 app.get('/nuevo-link', async (req, res) => {
-  const devId = req.query.dev;
   try {
-    const dev = ensureDev(devId);
-    if (!dev.linkPago) await generarNuevoLink(devId);
-    return res.json({ link: dev.linkPago || '' });
-  } catch (e) {
-    log('❌ /nuevo-link error', e.message);
-    return res.json({ link: '' });
-  }
-});
-
-// Devuelve 1 evento pendiente (si hay) y lo consume
-app.get('/estado', (req, res) => {
-  const devId = req.query.dev;
-  try {
-    const dev = ensureDev(devId);
-    if (dev.queue.length > 0) {
-      const ev = dev.queue.shift();
-      log('📤 /estado → pagado:true', { dev: devId, ref: ev.ref, pref: ev.pref, restantes: dev.queue.length });
-      return res.json({ pagado: true, ref: ev.ref, pref: ev.pref });
+    const dev = (req.query.dev || '').toLowerCase();
+    if (!ALLOWED_DEVS.includes(dev)) {
+      return res.status(400).json({ error: 'dev invalido' });
     }
-    // No spam: no logueamos pagado:false para cada poll
-    return res.json({ pagado: false });
-  } catch (e) {
-    log('❌ /estado error', e.message);
-    return res.json({ pagado: false });
+
+    const info = await generarNuevoLinkParaDev(dev);
+
+    res.json({
+      dev,
+      link: info.link,
+      title: ITEM_BY_DEV[dev].title,
+      price: ITEM_BY_DEV[dev].unit_price,
+    });
+  } catch (error) {
+    console.error(
+      '❌ Error en /nuevo-link:',
+      error.response?.data || error.message,
+    );
+    res.status(500).json({ error: 'no se pudo generar link' });
   }
 });
 
-// Salud y diagnóstico
-app.get('/health', (_req, res) => res.status(200).send('ok'));
-app.get('/debug', (_req, res) => {
-  const snap = {};
-  for (const devId of ALLOWED_DEVS) {
-    const d = devices[devId] || {};
-    snap[devId] = {
-      ultimaPreferencia: d.ultimaPreferencia || '',
-      ultimaReferencia:  d.ultimaReferencia  || '',
-      queueLen: (d.queue || []).length,
-      linkShort: (d.linkPago || '').slice(0, 70)
-    };
+app.get('/estado', (req, res) => {
+  const dev = (req.query.dev || '').toLowerCase();
+  if (!ALLOWED_DEVS.includes(dev)) {
+    return res.status(400).json({ error: 'dev invalido' });
   }
-  res.json(snap);
+
+  const st = stateByDev[dev];
+  const flag = st.pagado;
+  if (flag) st.pagado = false; // consumimos el evento
+
+  res.json({ dev, pagado: flag });
 });
 
-// ─────────── Webhook de MP ───────────
+app.get('/panel', (req, res) => {
+  let html = `
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Panel QdRink TEST</title>
+    <style>
+      body { font-family: sans-serif; background:#111; color:#eee; }
+      table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+      th, td { border: 1px solid #444; padding: 6px 8px; font-size: 13px; }
+      th { background: #222; }
+      tr:nth-child(even) { background:#1b1b1b; }
+    </style>
+  </head>
+  <body>
+    <h1>Panel QdRink TEST</h1>
+    <table>
+      <tr>
+        <th>Fecha/Hora</th><th>Dev</th><th>Producto</th><th>Monto</th>
+        <th>Email</th><th>Estado</th><th>Medio</th><th>payment_id</th><th>pref_id</th>
+      </tr>
+  `;
+
+  pagos
+    .slice()
+    .reverse()
+    .forEach((p) => {
+      html += `
+      <tr>
+        <td>${p.fechaHora}</td>
+        <td>${p.dev}</td>
+        <td>${p.title}</td>
+        <td>${p.monto}</td>
+        <td>${p.email}</td>
+        <td>${p.estado}</td>
+        <td>${p.metodo}</td>
+        <td>${p.payment_id}</td>
+        <td>${p.preference_id || ''}</td>
+      </tr>
+    `;
+    });
+
+  html += `
+    </table>
+  </body>
+  </html>`;
+
+  res.send(html);
+});
+
+// ================== IPN / WEBHOOK ==================
+
 app.post('/ipn', async (req, res) => {
   try {
-    const id    = req.query.id    || req.body?.data?.id;
-    const topic = req.query.topic || req.body?.type;
+    console.log('📥 IPN recibida:', { query: req.query, body: req.body });
 
-    if (topic !== 'payment') return res.sendStatus(200);
-    if (!id) {
-      log('⚠️ Webhook sin id de pago');
+    // Detectar tipo de evento
+    const topic =
+      req.query.topic ||
+      req.query.type ||
+      req.body.topic ||
+      req.body.type;
+
+    // Ignoramos merchant_order y cualquier cosa que no sea "payment"
+    if (topic && topic !== 'payment') {
+      console.log('ℹ️ IPN de tipo no-payment, se ignora:', topic);
       return res.sendStatus(200);
     }
 
-    const r = await axios.get(
-      `https://api.mercadopago.com/v1/payments/${id}`,
-      { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+    // Buscar paymentId en los distintos formatos
+    const paymentId =
+      req.query['data.id'] ||
+      req.body['data.id'] ||
+      req.body?.data?.id ||
+      req.query.id ||
+      req.body.id;
+
+    if (!paymentId) {
+      console.log('⚠️ IPN sin payment_id. Nada que hacer.');
+      return res.sendStatus(200);
+    }
+
+    // Evitar procesar el mismo pago dos veces
+    if (processedPayments.has(paymentId)) {
+      console.log(
+        'ℹ️ Pago ya procesado, se ignora payment_id =',
+        paymentId,
+      );
+      return res.sendStatus(200);
+    }
+
+    const headers = { Authorization: `Bearer ${ACCESS_TOKEN}` };
+    const url = `https://api.mercadopago.com/v1/payments/${paymentId}`;
+
+    const mpRes = await axios.get(url, { headers });
+    const data = mpRes.data;
+
+    const estado = data.status;
+    const email = data.payer?.email || 'sin email';
+    const monto = data.transaction_amount;
+    const metodo = data.payment_method_id;
+    const descripcion = data.description;
+    const externalRef = data.external_reference || null;
+    const preference_id = data.preference_id || null;
+
+    console.log('📩 Pago recibido:', {
+      estado,
+      email,
+      monto,
+      metodo,
+      descripcion,
+      externalRef,
+    });
+    console.log('🔎 preference_id del pago:', preference_id);
+
+    const dev = ALLOWED_DEVS.includes(externalRef) ? externalRef : null;
+    console.log(
+      '🔐 dev detectado por external_reference:',
+      dev || 'ninguno',
     );
 
-    const data   = r.data || {};
-    const estado = data.status;
-    const prefId = data.preference_id || '';
-    const extRef = data.external_reference || '';
-    const email  = data.payer?.email || 'sin email';
+    if (estado === 'approved' && dev) {
+      const st = stateByDev[dev];
+      st.pagado = true;
 
-    // Mapear dev
-    let devId = null;
-    if (extRef && refIndex[extRef])      devId = refIndex[extRef];
-    else if (prefId && prefIndex[prefId]) devId = prefIndex[prefId];
-    else if (extRef && extRef.includes(':')) {
-      const guess = extRef.split(':')[0];
-      if (ALLOWED_DEVS.includes(guess)) devId = guess;
-    }
+      processedPayments.add(paymentId); // marcamos como procesado
 
-    log('📩 Pago recibido', { id, estado, email, prefId, extRef, devId });
+      const fechaHora = new Date().toLocaleString('es-AR', {
+        timeZone: 'America/Argentina/Buenos_Aires',
+      });
 
-    if (!devId) return res.sendStatus(200);
-    const dev = ensureDev(devId);
+      console.log(`✅ Pago confirmado y válido para ${dev}`);
 
-    // Anti-duplicado
-    if (dev.ultimoIdNotificado === id) return res.sendStatus(200);
-    dev.ultimoIdNotificado = id;
+      const registro = {
+        fechaHora,
+        dev,
+        email,
+        estado,
+        monto,
+        metodo,
+        descripcion,
+        payment_id: paymentId,
+        preference_id,
+        title: ITEM_BY_DEV[dev].title,
+      };
 
-    const coincide =
-      (prefId && dev.ultimaPreferencia && prefId === dev.ultimaPreferencia) ||
-      (extRef && dev.ultimaReferencia  && extRef === dev.ultimaReferencia);
+      pagos.push(registro);
 
-    if (estado === 'approved' && coincide) {
-      // Encolar evento
-      dev.queue.push({ ref: dev.ultimaReferencia, pref: dev.ultimaPreferencia, ts: Date.now() });
-      log('✅ Pago confirmado → evento encolado', { dev: devId, queueLen: dev.queue.length });
+      const logMsg =
+        `🕒 ${fechaHora} | Dev: ${dev}` +
+        ` | Producto: ${ITEM_BY_DEV[dev].title}` +
+        ` | Monto: ${monto}` +
+        ` | Pago de: ${email}` +
+        ` | Estado: ${estado}` +
+        ` | externalRef: ${externalRef}` +
+        ` | pref: ${preference_id}` +
+        ` | id: ${paymentId}\n`;
 
-      // Rotar QR luego de un margen (para que el ESP termine y pida el nuevo link)
-      setTimeout(async () => {
-        const oldPref = dev.ultimaPreferencia;
-        const oldRef  = dev.ultimaReferencia;
-        await generarNuevoLink(devId);
-        log('🔄 Nuevo enlace post-aprobación', { dev: devId, oldPref, oldRef });
-      }, ROTATE_DELAY_MS);
-    } else if (estado === 'approved' && !coincide) {
-      log('🚫 Pago con QR ya usado', { dev: devId, prefId, extRef });
+      fs.appendFileSync('pagos.log', logMsg);
+
+      // Programar rotación de QR SOLO si aún no hay una agendada
+      if (!st.rotateScheduled) {
+        st.rotateScheduled = true;
+        setTimeout(() => {
+          recargarLinkConReintento(dev);
+          st.rotateScheduled = false;
+        }, ROTATE_DELAY_MS);
+      } else {
+        console.log(
+          `ℹ️ Rotación de QR ya agendada para ${dev}, no se agenda otra.`,
+        );
+      }
     } else {
-      log('ℹ️ Pago no aprobado (estado)', { dev: devId, estado });
+      console.log(
+        '⚠️ Pago aprobado pero NO corresponde a ningún dev QdRink. Ignorado.',
+      );
     }
 
-    return res.sendStatus(200);
-  } catch (e) {
-    log('❌ Error en /ipn', e.response?.data || e.message);
-    return res.sendStatus(200);
+    res.sendStatus(200);
+  } catch (error) {
+    console.error('❌ Error en /ipn:', error.response?.data || error.message);
+    res.sendStatus(200); // Respondemos 200 igual para que MP no reintente infinito
   }
 });
 
-// ─────────── Arranque ───────────
+// ================== ARRANQUE ==================
+
 app.listen(PORT, () => {
-  log(`Servidor activo en http://localhost:${PORT}`);
-  log('URL pública Render: usa /nuevo-link?dev=bar1|bar2|bar3');
+  console.log(`Servidor activo en http://localhost:${PORT}`);
+  console.log('Generando links iniciales por cada dev...');
+  ALLOWED_DEVS.forEach((dev) => {
+    recargarLinkConReintento(dev);
+  });
 });
