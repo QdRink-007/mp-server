@@ -1,9 +1,4 @@
 // index.js – Servidor QdRink multi-BAR (modo PRODUCCION mp-server)
-// ✅ Fixes:
-// 1) Evento de pago persistente hasta ACK (evita perder pagos por timing / timeouts)
-// 2) external_reference ÚNICO por cada QR (evita pagos atrasados / reintentos que “peguen” a QR viejo)
-// 3) /estado ya NO “consume” el pago; se consume con /ack
-// 4) Logs más claros (no dice “pago aprobado” si está rechazado)
 
 const express = require('express');
 const axios = require('axios');
@@ -17,7 +12,7 @@ const PORT = process.env.PORT || 10000;
 
 const ACCESS_TOKEN =
   process.env.MP_ACCESS_TOKEN ||
-  'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // <-- Recomendado: usar ENV
+  'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685';
 
 const ROTATE_DELAY_MS = Number(process.env.ROTATE_DELAY_MS || 5000); // 5 s
 const WEBHOOK_URL =
@@ -32,15 +27,13 @@ const ITEM_BY_DEV = {
 };
 
 // Estado por dispositivo
-// paidEvent persiste hasta que el ESP haga /ack
 const stateByDev = {};
 ALLOWED_DEVS.forEach((dev) => {
   stateByDev[dev] = {
-    paidEvent: null,          // { payment_id, at, monto, metodo, email, extRef }
-    expectedExtRef: null,     // external_reference del QR vigente (UNICO)
-    ultimaPreferencia: null,  // preference_id (para log)
-    linkActual: null,         // init_point
-    rotateScheduled: false,   // evita rotaciones duplicadas
+    pagado: false,
+    ultimaPreferencia: null,
+    linkActual: null,
+    rotateScheduled: false, // 👈 nuevo: evita rotaciones duplicadas
   };
 });
 
@@ -54,28 +47,15 @@ app.use(bodyParser.json());
 
 // ================== HELPERS MP ==================
 
-function buildUniqueExtRef(dev) {
-  // ÚNICO por QR, para validar que el pago corresponde al QR vigente
-  return `${dev}:${Date.now()}`;
-}
-
-function nowAR() {
-  return new Date().toLocaleString('es-AR', {
-    timeZone: 'America/Argentina/Buenos_Aires',
-  });
-}
-
 async function generarNuevoLinkParaDev(dev) {
   const item = ITEM_BY_DEV[dev];
   if (!item) throw new Error(`Item no definido para dev=${dev}`);
 
   const headers = { Authorization: `Bearer ${ACCESS_TOKEN}` };
 
-  const extRef = buildUniqueExtRef(dev);
-
   const body = {
     items: [item],
-    external_reference: extRef, // ✅ único por QR
+    external_reference: dev, // identifica al BAR
     notification_url: WEBHOOK_URL,
   };
 
@@ -90,17 +70,14 @@ async function generarNuevoLinkParaDev(dev) {
 
   stateByDev[dev].ultimaPreferencia = prefId;
   stateByDev[dev].linkActual = pref.init_point;
-  stateByDev[dev].expectedExtRef = extRef;
 
   console.log(`🔄 Nuevo link generado para ${dev}:`, {
     preference_id: prefId,
-    external_reference: extRef,
     link: pref.init_point,
   });
 
   return {
     preference_id: prefId,
-    external_reference: extRef,
     link: pref.init_point,
   };
 }
@@ -116,7 +93,9 @@ function recargarLinkConReintento(dev, intento = 1) {
     );
 
     if (intento < MAX_INTENTOS) {
-      console.log(`⏳ Reintentando generar link para ${dev} en ${esperaMs} ms...`);
+      console.log(
+        `⏳ Reintentando generar link para ${dev} en ${esperaMs} ms...`,
+      );
       setTimeout(() => recargarLinkConReintento(dev, intento + 1), esperaMs);
     } else {
       console.log(
@@ -146,15 +125,16 @@ app.get('/nuevo-link', async (req, res) => {
       link: info.link,
       title: ITEM_BY_DEV[dev].title,
       price: ITEM_BY_DEV[dev].unit_price,
-      external_reference: info.external_reference, // útil para debug
     });
   } catch (error) {
-    console.error('❌ Error en /nuevo-link:', error.response?.data || error.message);
+    console.error(
+      '❌ Error en /nuevo-link:',
+      error.response?.data || error.message,
+    );
     res.status(500).json({ error: 'no se pudo generar link' });
   }
 });
 
-// ✅ YA NO CONSUME: devuelve el evento pendiente (o null)
 app.get('/estado', (req, res) => {
   const dev = (req.query.dev || '').toLowerCase();
   if (!ALLOWED_DEVS.includes(dev)) {
@@ -162,31 +142,10 @@ app.get('/estado', (req, res) => {
   }
 
   const st = stateByDev[dev];
-  res.json({
-    dev,
-    paidEvent: st.paidEvent, // { payment_id, ... } o null
-  });
-});
+  const flag = st.pagado;
+  if (flag) st.pagado = false; // consumimos el evento
 
-// ✅ ACK: el ESP confirma que ya accionó el relé
-app.get('/ack', (req, res) => {
-  const dev = (req.query.dev || '').toLowerCase();
-  const payment_id = String(req.query.payment_id || '');
-
-  if (!ALLOWED_DEVS.includes(dev)) {
-    return res.status(400).json({ error: 'dev invalido' });
-  }
-  if (!payment_id) {
-    return res.status(400).json({ error: 'payment_id requerido' });
-  }
-
-  const st = stateByDev[dev];
-  if (st.paidEvent && String(st.paidEvent.payment_id) === payment_id) {
-    st.paidEvent = null;
-    return res.json({ ok: true });
-  }
-
-  res.json({ ok: false });
+  res.json({ dev, pagado: flag });
 });
 
 app.get('/panel', (req, res) => {
@@ -201,17 +160,14 @@ app.get('/panel', (req, res) => {
       th, td { border: 1px solid #444; padding: 6px 8px; font-size: 13px; }
       th { background: #222; }
       tr:nth-child(even) { background:#1b1b1b; }
-      .muted { color:#aaa; font-size: 12px; }
     </style>
   </head>
   <body>
     <h1>Panel QdRink TEST</h1>
-    <div class="muted">Estado actual por dev:</div>
-    <pre class="muted">${escapeHtml(JSON.stringify(stateByDev, null, 2))}</pre>
     <table>
       <tr>
         <th>Fecha/Hora</th><th>Dev</th><th>Producto</th><th>Monto</th>
-        <th>Email</th><th>Estado</th><th>Medio</th><th>payment_id</th><th>pref_id</th><th>ext_ref</th>
+        <th>Email</th><th>Estado</th><th>Medio</th><th>payment_id</th><th>pref_id</th>
       </tr>
   `;
 
@@ -230,7 +186,6 @@ app.get('/panel', (req, res) => {
         <td>${p.metodo}</td>
         <td>${p.payment_id}</td>
         <td>${p.preference_id || ''}</td>
-        <td>${p.external_reference || ''}</td>
       </tr>
     `;
     });
@@ -276,8 +231,11 @@ app.post('/ipn', async (req, res) => {
     }
 
     // Evitar procesar el mismo pago dos veces
-    if (processedPayments.has(String(paymentId))) {
-      console.log('ℹ️ Pago ya procesado, se ignora payment_id =', paymentId);
+    if (processedPayments.has(paymentId)) {
+      console.log(
+        'ℹ️ Pago ya procesado, se ignora payment_id =',
+        paymentId,
+      );
       return res.sendStatus(200);
     }
 
@@ -288,7 +246,6 @@ app.post('/ipn', async (req, res) => {
     const data = mpRes.data;
 
     const estado = data.status;
-    const status_detail = data.status_detail || null;
     const email = data.payer?.email || 'sin email';
     const monto = data.transaction_amount;
     const metodo = data.payment_method_id;
@@ -298,7 +255,6 @@ app.post('/ipn', async (req, res) => {
 
     console.log('📩 Pago recibido:', {
       estado,
-      status_detail,
       email,
       monto,
       metodo,
@@ -307,42 +263,23 @@ app.post('/ipn', async (req, res) => {
     });
     console.log('🔎 preference_id del pago:', preference_id);
 
-    // dev viene dentro de external_reference = "bar1:timestamp"
-    const dev = (externalRef ? String(externalRef).split(':')[0] : '').toLowerCase();
-    const devValido = ALLOWED_DEVS.includes(dev);
+    const dev = ALLOWED_DEVS.includes(externalRef) ? externalRef : null;
+    console.log(
+      '🔐 dev detectado por external_reference:',
+      dev || 'ninguno',
+    );
 
-    console.log('🔐 dev detectado por external_reference:', devValido ? dev : 'ninguno');
-    if (devValido) {
-      console.log('🔐 extRef esperado (QR vigente):', stateByDev[dev].expectedExtRef);
-      console.log('🔐 extRef recibido (pago):', externalRef);
-    }
-
-    // Caso no aprobado: solo logueamos
-    if (estado !== 'approved') {
-      console.log(`⚠️ Pago NO aprobado (${estado}). Detalle:`, status_detail);
-      // marcamos como procesado igual para no spamear logs con reintentos del mismo paymentId
-      processedPayments.add(String(paymentId));
-      return res.sendStatus(200);
-    }
-
-    // Validación fuerte: aprobado + dev válido + extRef coincide con QR vigente
-    if (devValido && externalRef && externalRef === stateByDev[dev].expectedExtRef) {
+    if (estado === 'approved' && dev) {
       const st = stateByDev[dev];
+      st.pagado = true;
 
-      // Guardar evento persistente (hasta /ack)
-      st.paidEvent = {
-        payment_id: String(paymentId),
-        at: Date.now(),
-        monto,
-        metodo,
-        email,
-        extRef: externalRef,
-      };
+      processedPayments.add(paymentId); // marcamos como procesado
 
-      processedPayments.add(String(paymentId));
+      const fechaHora = new Date().toLocaleString('es-AR', {
+        timeZone: 'America/Argentina/Buenos_Aires',
+      });
 
-      const fechaHora = nowAR();
-      console.log(`✅ Pago confirmado y válido para ${dev} (evento guardado hasta ACK)`);
+      console.log(`✅ Pago confirmado y válido para ${dev}`);
 
       const registro = {
         fechaHora,
@@ -352,9 +289,8 @@ app.post('/ipn', async (req, res) => {
         monto,
         metodo,
         descripcion,
-        payment_id: String(paymentId),
+        payment_id: paymentId,
         preference_id,
-        external_reference: externalRef,
         title: ITEM_BY_DEV[dev].title,
       };
 
@@ -366,7 +302,7 @@ app.post('/ipn', async (req, res) => {
         ` | Monto: ${monto}` +
         ` | Pago de: ${email}` +
         ` | Estado: ${estado}` +
-        ` | extRef: ${externalRef}` +
+        ` | externalRef: ${externalRef}` +
         ` | pref: ${preference_id}` +
         ` | id: ${paymentId}\n`;
 
@@ -380,29 +316,22 @@ app.post('/ipn', async (req, res) => {
           st.rotateScheduled = false;
         }, ROTATE_DELAY_MS);
       } else {
-        console.log(`ℹ️ Rotación de QR ya agendada para ${dev}, no se agenda otra.`);
+        console.log(
+          `ℹ️ Rotación de QR ya agendada para ${dev}, no se agenda otra.`,
+        );
       }
     } else {
-      // Aprobado pero no corresponde al QR vigente o dev no válido
-      console.log('⚠️ Pago aprobado pero NO corresponde al QR vigente (o dev inválido). Ignorado.');
-      processedPayments.add(String(paymentId));
+      console.log(
+        '⚠️ Pago aprobado pero NO corresponde a ningún dev QdRink. Ignorado.',
+      );
     }
 
     res.sendStatus(200);
   } catch (error) {
     console.error('❌ Error en /ipn:', error.response?.data || error.message);
-    res.sendStatus(200); // 200 igual para evitar reintentos infinitos
+    res.sendStatus(200); // Respondemos 200 igual para que MP no reintente infinito
   }
 });
-
-// ================== UTILS ==================
-
-function escapeHtml(str) {
-  return String(str)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
-}
 
 // ================== ARRANQUE ==================
 
