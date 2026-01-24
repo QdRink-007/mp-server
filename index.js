@@ -26,8 +26,8 @@ const WEBHOOK_URL =
 const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3'];
 
 const ITEM_BY_DEV = {
-  bar1: { title: 'Pinta Rubia', quantity: 1, currency_id: 'ARS', unit_price: 2000 },
-  bar2: { title: 'Pinta', quantity: 1, currency_id: 'ARS', unit_price: 2000 },
+  bar1: { title: 'Pinta Rubia', quantity: 1, currency_id: 'ARS', unit_price: 1000 },
+  bar2: { title: 'Pinta', quantity: 1, currency_id: 'ARS', unit_price: 1000 },
   bar3: { title: 'Pinta Roja',  quantity: 1, currency_id: 'ARS', unit_price: 120 },
 };
 
