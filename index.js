@@ -39,7 +39,6 @@ const MARKETPLACE_FEE_PERCENT_BY_DEV = {
 };
 
 const MARKETPLACE_FEE_MIN = 10; // piso mínimo en pesos
-};
 
 const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3'];
 
