@@ -1,4 +1,4 @@
-// index.js – QdRink multi-BAR + OAuth Marketplace (PRODUCCION)
+// index.js – QdRink multi-BAR + OAuth Marketplace + precio(PRODUCCION)
 // - OAuth connect por dev (bar2, bar3...)
 // - Usa token del vendedor para crear preferencias
 // - marketplace_fee para comisión
@@ -86,6 +86,7 @@ ALLOWED_DEVS.forEach((dev) => {
     ultimaPreferencia: null,
     linkActual: null,
     rotateScheduled: false,
+    lastPrice: ITEM_BY_DEV[dev].unit_price,
   };
 });
 
@@ -233,63 +234,72 @@ async function getAccessTokenForDev(dev) {
 
 // ================== MP: CREAR PREFERENCIA ==================
 
-async function generarNuevoLinkParaDev(dev) {
-  const item = ITEM_BY_DEV[dev];
-  if (!item) throw new Error(`Item no definido para dev=${dev}`);
+    async function generarNuevoLinkParaDev(dev, priceOverride) {
+    const baseItem = ITEM_BY_DEV[dev];
+    if (!baseItem) throw new Error(`Item no definido para dev=${dev}`);
 
-  const sellerToken = await getAccessTokenForDev(dev);
-  if (!sellerToken) {
-    throw new Error(`Dev ${dev} no está conectado por OAuth (no hay token vendedor)`);
+    // ✅ Clonar item para NO pisar ITEM_BY_DEV global
+    const item = { ...baseItem };
+
+    // ✅ Override de precio si viene
+    if (Number.isFinite(priceOverride) && priceOverride >= 100 && priceOverride <= 65000) {
+      item.unit_price = priceOverride;
+    }
+
+    const sellerToken = await getAccessTokenForDev(dev);
+    if (!sellerToken) {
+      throw new Error(`Dev ${dev} no está conectado por OAuth (no hay token vendedor)`);
+    }
+
+    const headers = { Authorization: `Bearer ${sellerToken}` };
+    const extRef = buildUniqueExtRef(dev);
+
+    const pct = Number(MARKETPLACE_FEE_PERCENT_BY_DEV[dev] || 0);
+
+    // ✅ fee calculado con el precio final (override incluido)
+    let fee = Math.round(item.unit_price * pct);
+    if (pct > 0) fee = Math.max(MARKETPLACE_FEE_MIN, fee);
+
+    const body = {
+      items: [item],
+      external_reference: extRef,
+      notification_url: WEBHOOK_URL,
+      ...(fee > 0 ? { marketplace_fee: fee } : {}),
+    };
+
+    const res = await axios.post(
+      'https://api.mercadopago.com/checkout/preferences',
+      body,
+      { headers },
+    );
+
+    const pref = res.data;
+    const prefId = pref.id || pref.preference_id;
+
+    stateByDev[dev].ultimaPreferencia = prefId;
+    stateByDev[dev].linkActual = pref.init_point;
+    stateByDev[dev].expectedExtRef = extRef;
+
+    // ✅ guardar precio vigente por dev (útil para panel/log)
+    stateByDev[dev].lastPrice = item.unit_price;
+
+    console.log(`🔄 Nuevo link generado para ${dev}:`, {
+      preference_id: prefId,
+      external_reference: extRef,
+      link: pref.init_point,
+      price: item.unit_price,
+      marketplace_fee: fee,
+    });
+
+    return { preference_id: prefId, external_reference: extRef, link: pref.init_point, price: item.unit_price };
   }
 
-  const headers = { Authorization: `Bearer ${sellerToken}` };
-  const extRef = buildUniqueExtRef(dev);
-
-  const pct = Number(MARKETPLACE_FEE_PERCENT_BY_DEV[dev] || 0);
-
-  // fee = max(piso, unit_price * %)
-  let fee = Math.round(item.unit_price * pct);
-
-  if (pct > 0) {
-    fee = Math.max(MARKETPLACE_FEE_MIN, fee);
-  }
-
-  const body = {
-    items: [item],
-    external_reference: extRef,
-    notification_url: WEBHOOK_URL,
-    // Marketplace fee: monto fijo de comisión (si tu cuenta es marketplace)
-    ...(fee > 0 ? { marketplace_fee: fee } : {}),
-  };
-
-  const res = await axios.post(
-    'https://api.mercadopago.com/checkout/preferences',
-    body,
-    { headers },
-  );
-
-  const pref = res.data;
-  const prefId = pref.id || pref.preference_id;
-
-  stateByDev[dev].ultimaPreferencia = prefId;
-  stateByDev[dev].linkActual = pref.init_point;
-  stateByDev[dev].expectedExtRef = extRef;
-
-  console.log(`🔄 Nuevo link generado para ${dev}:`, {
-    preference_id: prefId,
-    external_reference: extRef,
-    link: pref.init_point,
-    marketplace_fee: fee,
-  });
-
-  return { preference_id: prefId, external_reference: extRef, link: pref.init_point };
-}
 
 function recargarLinkConReintento(dev, intento = 1) {
   const MAX_INTENTOS = 5;
   const esperaMs = 2000 * intento;
 
-  generarNuevoLinkParaDev(dev).catch((err) => {
+  generarNuevoLinkParaDev(dev, stateByDev[dev]?.lastPrice).catch((err) => {
     console.error(
       `❌ Error al regenerar link para ${dev} (intento ${intento}):`,
       err.response?.data || err.message,
@@ -317,13 +327,17 @@ app.get('/nuevo-link', async (req, res) => {
       return res.status(400).json({ error: 'dev invalido' });
     }
 
-    const info = await generarNuevoLinkParaDev(dev);
+    // leer price del query (viene desde el ESP)
+    let price = Number(req.query.price);
+    if (!Number.isFinite(price) || price < 100 || price > 65000) price = undefined;
+
+    const info = await generarNuevoLinkParaDev(dev, price);
 
     res.json({
       dev,
       link: info.link,
       title: ITEM_BY_DEV[dev].title,
-      price: ITEM_BY_DEV[dev].unit_price,
+      price: info.price, // precio real usado
       external_reference: info.external_reference,
     });
   } catch (error) {
@@ -503,7 +517,8 @@ app.post('/ipn', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    if (devValido && externalRef && externalRef === stateByDev[dev].expectedExtRef) {
+    if (devValido && externalRef && externalRef === stateByDev[dev].expectedExtRef
+    && preference_id === stateByDev[dev].ultimaPreferencia) {
       const st = stateByDev[dev];
 
       st.paidEvent = {
@@ -536,15 +551,15 @@ app.post('/ipn', async (req, res) => {
       pagos.push(registro);
 
       const logMsg =
-        `🕒 ${fechaHora} | Dev: ${dev}` +
-        ` | Producto: ${ITEM_BY_DEV[dev].title}` +
-        ` | Monto: ${monto}` +
-        ` | Pago de: ${email}` +
-        ` | Estado: ${estado}` +
-        ` | extRef: ${externalRef}` +
-        ` | pref: ${preference_id}` +
-        ` | id: ${paymentId}\n`;
-
+       `🕒 ${fechaHora} | Dev: ${dev}` +
+       ` | Producto: ${ITEM_BY_DEV[dev].title}` +
+       ` | Monto: ${monto}` +
+       ` | Pago de: ${email}` +
+       ` | Estado: ${estado}` +
+       ` | extRef: ${externalRef}` +
+       ` | pref: ${preference_id}` +
+       ` | id: ${paymentId}` +
+       ` | price: ${stateByDev[dev].lastPrice || ITEM_BY_DEV[dev].unit_price}\n`;
       fs.appendFileSync('pagos.log', logMsg);
 
       if (!st.rotateScheduled) {
