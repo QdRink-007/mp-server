@@ -1,4 +1,4 @@
-// index.js – QdRink multi-BAR + OAuth Marketplace + precio(PRODUCCION)
+// index.js – QdRink multi-BAR + OAuth Marketplace (PRODUCCION)
 // - OAuth connect por dev (bar2, bar3...)
 // - Usa token del vendedor para crear preferencias
 // - marketplace_fee para comisión
@@ -327,18 +327,38 @@ app.get('/nuevo-link', async (req, res) => {
       return res.status(400).json({ error: 'dev invalido' });
     }
 
+    // ✅ Idempotencia: si ya hay un QR vigente (no pagado), devolvemos el MISMO link
+    // (Evita que el ESP regenere y luego el pago quede como "QR viejo")
+    const force = String(req.query.force || '') === '1';
+    const st = stateByDev[dev];
+
+    // si ya hay un link vigente en memoria, lo reusamos (a menos que force=1)
+    if (!force && st?.linkActual && st?.expectedExtRef && st?.ultimaPreferencia) {
+      return res.json({
+        dev,
+        link: st.linkActual,
+        title: ITEM_BY_DEV[dev].title,
+        price: st.lastPrice,
+        external_reference: st.expectedExtRef,
+        preference_id: st.ultimaPreferencia,
+        reused: true,
+      });
+    }
+
     // leer price del query (viene desde el ESP)
     let price = Number(req.query.price);
     if (!Number.isFinite(price) || price < 100 || price > 65000) price = undefined;
 
     const info = await generarNuevoLinkParaDev(dev, price);
 
-    res.json({
+    return res.json({
       dev,
       link: info.link,
       title: ITEM_BY_DEV[dev].title,
       price: info.price, // precio real usado
       external_reference: info.external_reference,
+      preference_id: info.preference_id,
+      reused: false,
     });
   } catch (error) {
     console.error('❌ Error en /nuevo-link:', error.response?.data || error.message);
