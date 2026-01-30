@@ -4,6 +4,9 @@
 // - marketplace_fee para comisión
 // - IPN intenta leer payment con token correcto (fallback)
 // - refresh automático con refresh_token (offline_access)
+// - ✅ Persistencia en Render Disk (/var/data): tokens + state + pagos.log
+// - ✅ /nuevo-link idempotente (no regenera si hay QR vigente)
+// - ✅ IPN valida por externalRef O preference_id
 
 const express = require('express');
 const axios = require('axios');
@@ -31,6 +34,12 @@ const ROTATE_DELAY_MS = Number(process.env.ROTATE_DELAY_MS || 5000);
 const WEBHOOK_URL =
   process.env.WEBHOOK_URL || 'https://mp-server-c1mg.onrender.com/ipn';
 
+// ✅ Render Disk mount
+const DATA_DIR = process.env.DATA_DIR || '/var/data';
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+console.log('📦 DATA_DIR:', DATA_DIR);
+
 // Comisión por DEV (porcentaje + piso mínimo)
 const MARKETPLACE_FEE_PERCENT_BY_DEV = {
   bar1: 0,     // bar1 cobra a tu cuenta → sin comisión
@@ -50,7 +59,7 @@ const ITEM_BY_DEV = {
 
 // ================== TOKENS STORE (por dev) ==================
 
-const TOKENS_PATH = path.join(__dirname, 'tokens.json');
+const TOKENS_PATH = path.join(DATA_DIR, 'tokens.json');
 
 function loadTokens() {
   try {
@@ -75,23 +84,58 @@ function saveTokens(obj) {
 //   access_token, refresh_token, token_type, expires_in, expires_at, user_id
 // }
 let tokensByDev = loadTokens();
+console.log('🔑 tokens.json existe?', fs.existsSync(TOKENS_PATH));
+console.log('🔑 tokens cargados:', Object.keys(tokensByDev));
+
+// ================== STATE STORE (por dev) ==================
+
+const STATE_PATH = path.join(DATA_DIR, 'stateByDev.json');
+
+function loadState() {
+  try {
+    if (!fs.existsSync(STATE_PATH)) return {};
+    return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+  } catch (e) {
+    console.error('❌ No pude leer stateByDev.json:', e.message);
+    return {};
+  }
+}
+
+function saveState(obj) {
+  try {
+    fs.writeFileSync(STATE_PATH, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.error('❌ No pude guardar stateByDev.json:', e.message);
+  }
+}
 
 // ================== ESTADO POR DEV ==================
 
-const stateByDev = {};
+const stateByDev = loadState();
+
+// asegurar defaults por cada dev (y compatibilidad si el JSON viejo no tiene campos)
 ALLOWED_DEVS.forEach((dev) => {
+  if (!stateByDev[dev]) stateByDev[dev] = {};
   stateByDev[dev] = {
-    paidEvent: null,
-    expectedExtRef: null,
-    ultimaPreferencia: null,
-    linkActual: null,
-    rotateScheduled: false,
-    lastPrice: ITEM_BY_DEV[dev].unit_price,
+    paidEvent: stateByDev[dev].paidEvent ?? null,
+    expectedExtRef: stateByDev[dev].expectedExtRef ?? null,
+    ultimaPreferencia: stateByDev[dev].ultimaPreferencia ?? null,
+    linkActual: stateByDev[dev].linkActual ?? null,
+    rotateScheduled: false, // no lo persistimos, solo runtime
+    lastPrice: Number(stateByDev[dev].lastPrice ?? ITEM_BY_DEV[dev].unit_price),
   };
 });
 
+console.log('📦 stateByDev cargado:', Object.keys(stateByDev));
+console.log('📦 stateByDev resumen:', Object.fromEntries(
+  Object.entries(stateByDev).map(([k,v]) => [k, { expectedExtRef: v.expectedExtRef, ultimaPreferencia: v.ultimaPreferencia, linkActual: !!v.linkActual }])
+));
+
 const pagos = [];
 const processedPayments = new Set();
+
+// ✅ pagos.log persistente
+const PAYLOG_PATH = path.join(DATA_DIR, 'pagos.log');
 
 // ================== HELPERS ==================
 
@@ -119,8 +163,6 @@ app.get('/connect', (req, res) => {
   const dev = String(req.query.dev || '').toLowerCase();
   if (!ALLOWED_DEVS.includes(dev)) return res.status(400).send('dev invalido');
 
-  // scopes: read, write, offline_access (ya los marcaste en el panel)
-  // Nota: MP usa un flujo standard. El endpoint de authorization es este:
   const authUrl =
     `https://auth.mercadopago.com.ar/authorization` +
     `?response_type=code` +
@@ -140,7 +182,6 @@ app.get('/oauth/callback', async (req, res) => {
     if (!code) return res.status(400).send('Falta code');
     if (!ALLOWED_DEVS.includes(dev)) return res.status(400).send('State/dev invalido');
 
-    // Intercambio code -> tokens
     const form = new URLSearchParams();
     form.append('grant_type', 'authorization_code');
     form.append('client_id', MP_CLIENT_ID);
@@ -211,13 +252,11 @@ async function refreshTokenForDev(dev) {
 }
 
 async function getAccessTokenForDev(dev) {
-  // bar1: por ahora usa tu token fijo (tu cuenta)
   if (dev === 'bar1') return ACCESS_TOKEN;
 
   const t = tokensByDev[dev];
   if (!t?.access_token) return null;
 
-  // refrescar si vence pronto (margen 60s)
   const marginMs = 60_000;
   if (t.expires_at && Date.now() > (t.expires_at - marginMs)) {
     try {
@@ -234,66 +273,63 @@ async function getAccessTokenForDev(dev) {
 
 // ================== MP: CREAR PREFERENCIA ==================
 
-    async function generarNuevoLinkParaDev(dev, priceOverride) {
-    const baseItem = ITEM_BY_DEV[dev];
-    if (!baseItem) throw new Error(`Item no definido para dev=${dev}`);
+async function generarNuevoLinkParaDev(dev, priceOverride) {
+  const baseItem = ITEM_BY_DEV[dev];
+  if (!baseItem) throw new Error(`Item no definido para dev=${dev}`);
 
-    // ✅ Clonar item para NO pisar ITEM_BY_DEV global
-    const item = { ...baseItem };
+  const item = { ...baseItem };
 
-    // ✅ Override de precio si viene
-    if (Number.isFinite(priceOverride) && priceOverride >= 100 && priceOverride <= 65000) {
-      item.unit_price = priceOverride;
-    }
-
-    const sellerToken = await getAccessTokenForDev(dev);
-    if (!sellerToken) {
-      throw new Error(`Dev ${dev} no está conectado por OAuth (no hay token vendedor)`);
-    }
-
-    const headers = { Authorization: `Bearer ${sellerToken}` };
-    const extRef = buildUniqueExtRef(dev);
-
-    const pct = Number(MARKETPLACE_FEE_PERCENT_BY_DEV[dev] || 0);
-
-    // ✅ fee calculado con el precio final (override incluido)
-    let fee = Math.round(item.unit_price * pct);
-    if (pct > 0) fee = Math.max(MARKETPLACE_FEE_MIN, fee);
-
-    const body = {
-      items: [item],
-      external_reference: extRef,
-      notification_url: WEBHOOK_URL,
-      ...(fee > 0 ? { marketplace_fee: fee } : {}),
-    };
-
-    const res = await axios.post(
-      'https://api.mercadopago.com/checkout/preferences',
-      body,
-      { headers },
-    );
-
-    const pref = res.data;
-    const prefId = pref.id || pref.preference_id;
-
-    stateByDev[dev].ultimaPreferencia = prefId;
-    stateByDev[dev].linkActual = pref.init_point;
-    stateByDev[dev].expectedExtRef = extRef;
-
-    // ✅ guardar precio vigente por dev (útil para panel/log)
-    stateByDev[dev].lastPrice = item.unit_price;
-
-    console.log(`🔄 Nuevo link generado para ${dev}:`, {
-      preference_id: prefId,
-      external_reference: extRef,
-      link: pref.init_point,
-      price: item.unit_price,
-      marketplace_fee: fee,
-    });
-
-    return { preference_id: prefId, external_reference: extRef, link: pref.init_point, price: item.unit_price };
+  if (Number.isFinite(priceOverride) && priceOverride >= 100 && priceOverride <= 65000) {
+    item.unit_price = priceOverride;
   }
 
+  const sellerToken = await getAccessTokenForDev(dev);
+  if (!sellerToken) {
+    throw new Error(`Dev ${dev} no está conectado por OAuth (no hay token vendedor)`);
+  }
+
+  const headers = { Authorization: `Bearer ${sellerToken}` };
+  const extRef = buildUniqueExtRef(dev);
+
+  const pct = Number(MARKETPLACE_FEE_PERCENT_BY_DEV[dev] || 0);
+
+  let fee = Math.round(item.unit_price * pct);
+  if (pct > 0) fee = Math.max(MARKETPLACE_FEE_MIN, fee);
+
+  const body = {
+    items: [item],
+    external_reference: extRef,
+    notification_url: WEBHOOK_URL,
+    ...(fee > 0 ? { marketplace_fee: fee } : {}),
+  };
+
+  const res = await axios.post(
+    'https://api.mercadopago.com/checkout/preferences',
+    body,
+    { headers },
+  );
+
+  const pref = res.data;
+  const prefId = pref.id || pref.preference_id;
+
+  stateByDev[dev].ultimaPreferencia = prefId;
+  stateByDev[dev].linkActual = pref.init_point;
+  stateByDev[dev].expectedExtRef = extRef;
+  stateByDev[dev].lastPrice = item.unit_price;
+
+  // ✅ persistir state
+  saveState(stateByDev);
+
+  console.log(`🔄 Nuevo link generado para ${dev}:`, {
+    preference_id: prefId,
+    external_reference: extRef,
+    link: pref.init_point,
+    price: item.unit_price,
+    marketplace_fee: fee,
+  });
+
+  return { preference_id: prefId, external_reference: extRef, link: pref.init_point, price: item.unit_price };
+}
 
 function recargarLinkConReintento(dev, intento = 1) {
   const MAX_INTENTOS = 5;
@@ -327,12 +363,10 @@ app.get('/nuevo-link', async (req, res) => {
       return res.status(400).json({ error: 'dev invalido' });
     }
 
-    // ✅ Idempotencia: si ya hay un QR vigente (no pagado), devolvemos el MISMO link
-    // (Evita que el ESP regenere y luego el pago quede como "QR viejo")
+    // ✅ idempotente: si ya hay QR vigente, devolvelo (salvo force=1)
     const force = String(req.query.force || '') === '1';
     const st = stateByDev[dev];
 
-    // si ya hay un link vigente en memoria, lo reusamos (a menos que force=1)
     if (!force && st?.linkActual && st?.expectedExtRef && st?.ultimaPreferencia) {
       return res.json({
         dev,
@@ -345,17 +379,16 @@ app.get('/nuevo-link', async (req, res) => {
       });
     }
 
-    // leer price del query (viene desde el ESP)
     let price = Number(req.query.price);
     if (!Number.isFinite(price) || price < 100 || price > 65000) price = undefined;
 
     const info = await generarNuevoLinkParaDev(dev, price);
 
-    return res.json({
+    res.json({
       dev,
       link: info.link,
       title: ITEM_BY_DEV[dev].title,
-      price: info.price, // precio real usado
+      price: info.price,
       external_reference: info.external_reference,
       preference_id: info.preference_id,
       reused: false,
@@ -386,6 +419,10 @@ app.get('/ack', (req, res) => {
   const st = stateByDev[dev];
   if (st.paidEvent && String(st.paidEvent.payment_id) === payment_id) {
     st.paidEvent = null;
+
+    // ✅ persistir state
+    saveState(stateByDev);
+
     return res.json({ ok: true });
   }
   res.json({ ok: false });
@@ -418,6 +455,16 @@ app.get('/panel', (req, res) => {
       <pre class="muted">${escapeHtml(JSON.stringify(Object.fromEntries(
         Object.entries(tokensByDev).map(([k,v]) => [k, { user_id: v.user_id, updated_at: v.updated_at, expires_at: v.expires_at }])
       ), null, 2))}</pre>
+
+      <div class="muted">Paths:</div>
+      <pre class="muted">${escapeHtml(JSON.stringify({
+        DATA_DIR,
+        TOKENS_PATH,
+        STATE_PATH,
+        PAYLOG_PATH,
+        tokens_exists: fs.existsSync(TOKENS_PATH),
+        state_exists: fs.existsSync(STATE_PATH),
+      }, null, 2))}</pre>
     </div>
 
     <div class="muted">Estado actual por dev:</div>
@@ -526,7 +573,7 @@ app.post('/ipn', async (req, res) => {
     const externalRef = data.external_reference || null;
     const preference_id = data.preference_id || null;
 
-    console.log('📩 Pago recibido:', { estado, status_detail, email, monto, metodo, externalRef });
+    console.log('📩 Pago recibido:', { estado, status_detail, email, monto, metodo, externalRef, preference_id });
 
     const dev = (externalRef ? String(externalRef).split(':')[0] : '').toLowerCase();
     const devValido = ALLOWED_DEVS.includes(dev);
@@ -537,10 +584,12 @@ app.post('/ipn', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    if (devValido && externalRef && externalRef === stateByDev[dev].expectedExtRef
-    && preference_id === stateByDev[dev].ultimaPreferencia) {
-      const st = stateByDev[dev];
+    // ✅ validar por externalRef O preference_id
+    const st = devValido ? stateByDev[dev] : null;
+    const okExt = !!(st && externalRef && externalRef === st.expectedExtRef);
+    const okPref = !!(st && preference_id && preference_id === st.ultimaPreferencia);
 
+    if (devValido && (okExt || okPref)) {
       st.paidEvent = {
         payment_id: String(paymentId),
         at: Date.now(),
@@ -549,6 +598,9 @@ app.post('/ipn', async (req, res) => {
         email,
         extRef: externalRef,
       };
+
+      // ✅ persistir state
+      saveState(stateByDev);
 
       processedPayments.add(String(paymentId));
 
@@ -580,7 +632,8 @@ app.post('/ipn', async (req, res) => {
        ` | pref: ${preference_id}` +
        ` | id: ${paymentId}` +
        ` | price: ${stateByDev[dev].lastPrice || ITEM_BY_DEV[dev].unit_price}\n`;
-      fs.appendFileSync('pagos.log', logMsg);
+
+      fs.appendFileSync(PAYLOG_PATH, logMsg);
 
       if (!st.rotateScheduled) {
         st.rotateScheduled = true;
@@ -591,6 +644,14 @@ app.post('/ipn', async (req, res) => {
       }
     } else {
       console.log('⚠️ Pago aprobado pero NO corresponde al QR vigente (o dev inválido). Ignorado.');
+      console.log('🧪 DEBUG mismatch:', {
+        dev,
+        externalRef,
+        expectedExtRef: stateByDev[dev]?.expectedExtRef,
+        preference_id,
+        ultimaPreferencia: stateByDev[dev]?.ultimaPreferencia,
+      });
+
       processedPayments.add(String(paymentId));
     }
 
@@ -608,7 +669,13 @@ app.listen(PORT, () => {
   console.log('Generando links iniciales por dev...');
 
   ALLOWED_DEVS.forEach((dev) => {
-    // Para devs OAuth (bar2/bar3) si todavía no están conectados, va a fallar
+    // ✅ Solo generar link inicial si:
+    // - bar1 siempre
+    // - bar2/bar3 solo si ya tienen token OAuth guardado
+    if (dev !== 'bar1' && !tokensByDev[dev]?.access_token) {
+      console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
+      return;
+    }
     recargarLinkConReintento(dev);
   });
 });
