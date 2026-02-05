@@ -45,16 +45,18 @@ const MARKETPLACE_FEE_PERCENT_BY_DEV = {
   bar1: 0,     // bar1 cobra a tu cuenta → sin comisión
   bar2: 0.10,  // 10%
   bar3: 0.10,
+  fernet: 0,
 };
 
 const MARKETPLACE_FEE_MIN = 10; // piso mínimo en pesos
 
-const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3'];
+const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3', 'fernet'];
 
 const ITEM_BY_DEV = {
   bar1: { title: 'Pinta Rubia', quantity: 1, currency_id: 'ARS', unit_price: 100 },
   bar2: { title: 'Pinta Negra', quantity: 1, currency_id: 'ARS', unit_price: 110 },
   bar3: { title: 'Pinta Roja',  quantity: 1, currency_id: 'ARS', unit_price: 120 },
+  fernet: { title: 'Fernet',    quantity: 1, currency_id: 'ARS', unit_price: 100 },
 };
 
 // ================== TOKENS STORE (por dev) ==================
@@ -252,7 +254,7 @@ async function refreshTokenForDev(dev) {
 }
 
 async function getAccessTokenForDev(dev) {
-  if (dev === 'bar1') return ACCESS_TOKEN;
+  if (dev === 'bar1' || dev === 'fernet') return ACCESS_TOKEN;
 
   const t = tokensByDev[dev];
   if (!t?.access_token) return null;
