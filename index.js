@@ -367,7 +367,13 @@ app.get('/nuevo-link', async (req, res) => {
     const force = String(req.query.force || '') === '1';
     const st = stateByDev[dev];
 
-    if (!force && st?.linkActual && st?.expectedExtRef && st?.ultimaPreferencia) {
+    let priceReq = Number(req.query.price);
+    if (!Number.isFinite(priceReq) || priceReq < 100 || priceReq > 65000) priceReq = null;
+
+    const priceChanged = (priceReq !== null && Number(st?.lastPrice) !== Number(priceReq));
+
+
+    if (!force && st?.linkActual && st?.expectedExtRef && st?.ultimaPreferencia && !priceChanged) {
       return res.json({
         dev,
         link: st.linkActual,
