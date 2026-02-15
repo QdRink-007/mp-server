@@ -52,9 +52,9 @@ const MARKETPLACE_FEE_MIN = 10; // piso mínimo en pesos
 const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3'];
 
 const ITEM_BY_DEV = {
-  bar1: { title: 'Pinta Rubia', quantity: 1, currency_id: 'ARS', unit_price: 100 },
-  bar2: { title: 'Pinta Negra', quantity: 1, currency_id: 'ARS', unit_price: 110 },
-  bar3: { title: 'Pinta Roja',  quantity: 1, currency_id: 'ARS', unit_price: 120 },
+  bar1: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 100 },
+  bar2: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 110 },
+  bar3: { title: 'Stella Artois',  quantity: 1, currency_id: 'ARS', unit_price: 120 },
 };
 
 // ================== TOKENS STORE (por dev) ==================
