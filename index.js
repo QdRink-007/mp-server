@@ -679,16 +679,17 @@ app.listen(PORT, () => {
   console.log('Generando links iniciales por dev...');
 
   ALLOWED_DEVS.forEach((dev) => {
-  // ✅ bar1/bar2/bar3 siempre generan (usan tu ACCESS_TOKEN)
-  if (dev === 'bar1' || dev === 'bar2' || dev === 'bar3') {
-    recargarLinkConReintento(dev);
-    return;
-  }
+    // ✅ bar1/bar2/bar3 siempre generan (usan tu ACCESS_TOKEN)
+    if (dev === 'bar1' || dev === 'bar2' || dev === 'bar3') {
+      recargarLinkConReintento(dev);
+      return;
+    }
 
-  // (si en el futuro agregás devs OAuth)
-  if (!tokensByDev[dev]?.access_token) {
-    console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
-    return;
-  }
-  recargarLinkConReintento(dev);
+    // (si en el futuro agregás devs OAuth)
+    if (!tokensByDev[dev]?.access_token) {
+      console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
+      return;
+    }
+    recargarLinkConReintento(dev);
+  });
 });
