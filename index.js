@@ -359,20 +359,6 @@ function recargarLinkConReintento(dev, intento = 1) {
     }
   });
 }
-  
-    console.error(
-      `❌ Error al regenerar link para ${dev} (intento ${intento}):`,
-      err.response?.data || err.message
-    );
-
-    if (intento < MAX_INTENTOS) {
-      console.log(`⏳ Reintentando generar link para ${dev} en ${esperaMs} ms...`);
-      setTimeout(() => recargarLinkConReintento(dev, intento + 1), esperaMs);
-    } else {
-      console.log(`⚠️ Se agotaron reintentos para ${dev}. Se mantiene último link.`);
-    }
-  });
-}
 
 // ================== RUTAS PRINCIPALES ==================
 
