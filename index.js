@@ -1,5 +1,5 @@
 // index.js – QdRink multi-BAR + OAuth Marketplace (PRODUCCION)
-// - OAuth connect por dev (bar2, bar3...)
+// - OAuth connect por dev (bar4)
 // - Usa token del vendedor para crear preferencias
 // - marketplace_fee para comisión
 // - IPN intenta leer payment con token correcto (fallback)
@@ -23,7 +23,7 @@ app.use(bodyParser.json());
 
 const ACCESS_TOKEN =
   process.env.MP_ACCESS_TOKEN ||
-  'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // tu token (marketplace) para bar1 o fallback
+  'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // ⚠️ mejor en ENV
 
 const MP_CLIENT_ID = process.env.MP_CLIENT_ID || '5741144054953865';
 const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || 'ET5bOFcRSRzgdDQU7G8qT7UydoELzA3b';
@@ -43,18 +43,22 @@ console.log('📦 DATA_DIR:', DATA_DIR);
 // Comisión por DEV (porcentaje + piso mínimo)
 const MARKETPLACE_FEE_PERCENT_BY_DEV = {
   bar1: 0,     // bar1 cobra a tu cuenta → sin comisión
-  bar2: 0,  // 10%
-  bar3: 0,
+  bar2: 0,     // bar2 cobra a tu cuenta (directo) → sin comisión
+  bar3: 0,     // bar3 cobra a tu cuenta (directo) → sin comisión
+  bar4: 0.03,  // ✅ bar4: 3% para vos (marketplace_fee)
 };
 
 const MARKETPLACE_FEE_MIN = 10; // piso mínimo en pesos
 
-const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3'];
+// ✅ Agregamos bar4
+const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3', 'bar4'];
 
 const ITEM_BY_DEV = {
   bar1: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 100 },
   bar2: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 110 },
-  bar3: { title: 'Stella Artois',  quantity: 1, currency_id: 'ARS', unit_price: 120 },
+  bar3: { title: 'Stella Artois', quantity: 1, currency_id: 'ARS', unit_price: 120 },
+  // ✅ Default para bar4 (después lo pisás con ?price=)
+  bar4: { title: 'Qtiket', quantity: 1, currency_id: 'ARS', unit_price: 4500 },
 };
 
 // ================== TOKENS STORE (por dev) ==================
@@ -79,10 +83,7 @@ function saveTokens(obj) {
   }
 }
 
-// Estructura esperada:
-// tokensByDev[dev] = {
-//   access_token, refresh_token, token_type, expires_in, expires_at, user_id
-// }
+// tokensByDev[dev] = { access_token, refresh_token, expires_at, user_id, ... }
 let tokensByDev = loadTokens();
 console.log('🔑 tokens.json existe?', fs.existsSync(TOKENS_PATH));
 console.log('🔑 tokens cargados:', Object.keys(tokensByDev));
@@ -113,7 +114,7 @@ function saveState(obj) {
 
 const stateByDev = loadState();
 
-// asegurar defaults por cada dev (y compatibilidad si el JSON viejo no tiene campos)
+// asegurar defaults por cada dev
 ALLOWED_DEVS.forEach((dev) => {
   if (!stateByDev[dev]) stateByDev[dev] = {};
   stateByDev[dev] = {
@@ -121,15 +122,13 @@ ALLOWED_DEVS.forEach((dev) => {
     expectedExtRef: stateByDev[dev].expectedExtRef ?? null,
     ultimaPreferencia: stateByDev[dev].ultimaPreferencia ?? null,
     linkActual: stateByDev[dev].linkActual ?? null,
-    rotateScheduled: false, // no lo persistimos, solo runtime
+    rotateScheduled: false,
     lastPrice: Number(stateByDev[dev].lastPrice ?? ITEM_BY_DEV[dev].unit_price),
+    lastTitle: String(stateByDev[dev].lastTitle ?? ITEM_BY_DEV[dev].title),
   };
 });
 
 console.log('📦 stateByDev cargado:', Object.keys(stateByDev));
-console.log('📦 stateByDev resumen:', Object.fromEntries(
-  Object.entries(stateByDev).map(([k,v]) => [k, { expectedExtRef: v.expectedExtRef, ultimaPreferencia: v.ultimaPreferencia, linkActual: !!v.linkActual }])
-));
 
 const pagos = [];
 const processedPayments = new Set();
@@ -158,7 +157,6 @@ function escapeHtml(str) {
 
 // ================== OAUTH ==================
 
-// Link que abre tu socio para conectar su cuenta a un dev (bar2 por ejemplo)
 app.get('/connect', (req, res) => {
   const dev = String(req.query.dev || '').toLowerCase();
   if (!ALLOWED_DEVS.includes(dev)) return res.status(400).send('dev invalido');
@@ -173,7 +171,6 @@ app.get('/connect', (req, res) => {
   res.redirect(authUrl);
 });
 
-// Callback: MP vuelve acá con ?code=...&state=bar2
 app.get('/oauth/callback', async (req, res) => {
   try {
     const code = String(req.query.code || '');
@@ -257,7 +254,7 @@ async function getAccessTokenForDev(dev) {
     return ACCESS_TOKEN;
   }
 
-  // (si en el futuro agregás otros devs OAuth, quedaría acá)
+  // ✅ bar4 (y futuros devs) usan OAuth
   const t = tokensByDev[dev];
   if (!t?.access_token) return null;
 
@@ -277,11 +274,16 @@ async function getAccessTokenForDev(dev) {
 
 // ================== MP: CREAR PREFERENCIA ==================
 
-async function generarNuevoLinkParaDev(dev, priceOverride) {
+async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
   const baseItem = ITEM_BY_DEV[dev];
   if (!baseItem) throw new Error(`Item no definido para dev=${dev}`);
 
-  const item = { ...baseItem };
+  const item = { ...baseItem }; 
+ 
+  if (typeof titleOverride === 'string') {
+    const t = titleOverride.trim();
+  if (t.length >= 2 && t.length <= 60) item.title = t;
+  }
 
   if (Number.isFinite(priceOverride) && priceOverride >= 100 && priceOverride <= 65000) {
     item.unit_price = priceOverride;
@@ -310,7 +312,7 @@ async function generarNuevoLinkParaDev(dev, priceOverride) {
   const res = await axios.post(
     'https://api.mercadopago.com/checkout/preferences',
     body,
-    { headers },
+    { headers }
   );
 
   const pref = res.data;
@@ -320,8 +322,8 @@ async function generarNuevoLinkParaDev(dev, priceOverride) {
   stateByDev[dev].linkActual = pref.init_point;
   stateByDev[dev].expectedExtRef = extRef;
   stateByDev[dev].lastPrice = item.unit_price;
+  stateByDev[dev].lastTitle = item.title;
 
-  // ✅ persistir state
   saveState(stateByDev);
 
   console.log(`🔄 Nuevo link generado para ${dev}:`, {
@@ -339,10 +341,28 @@ function recargarLinkConReintento(dev, intento = 1) {
   const MAX_INTENTOS = 5;
   const esperaMs = 2000 * intento;
 
-  generarNuevoLinkParaDev(dev, stateByDev[dev]?.lastPrice).catch((err) => {
+  generarNuevoLinkParaDev(
+    dev,
+    stateByDev[dev]?.lastPrice,
+    stateByDev[dev]?.lastTitle || ITEM_BY_DEV[dev].title
+  ).catch((err) => {
     console.error(
       `❌ Error al regenerar link para ${dev} (intento ${intento}):`,
-      err.response?.data || err.message,
+      err.response?.data || err.message
+    );
+
+    if (intento < MAX_INTENTOS) {
+      console.log(`⏳ Reintentando generar link para ${dev} en ${esperaMs} ms...`);
+      setTimeout(() => recargarLinkConReintento(dev, intento + 1), esperaMs);
+    } else {
+      console.log(`⚠️ Se agotaron reintentos para ${dev}. Se mantiene último link.`);
+    }
+  });
+}
+  
+    console.error(
+      `❌ Error al regenerar link para ${dev} (intento ${intento}):`,
+      err.response?.data || err.message
     );
 
     if (intento < MAX_INTENTOS) {
@@ -367,21 +387,31 @@ app.get('/nuevo-link', async (req, res) => {
       return res.status(400).json({ error: 'dev invalido' });
     }
 
-    // ✅ idempotente: si ya hay QR vigente, devolvelo (salvo force=1)
     const force = String(req.query.force || '') === '1';
     const st = stateByDev[dev];
+
+    let titleReq = req.query.title;
+    if (typeof titleReq === 'string') {
+      titleReq = titleReq.trim();
+      if (titleReq.length < 2 || titleReq.length > 60) titleReq = null;
+    } else {
+      titleReq = null;
+    }
+
+    // si no mandan title por query, usa el último guardado
+    const finalTitle = titleReq ?? String(st?.lastTitle ?? ITEM_BY_DEV[dev].title);
+    const titleChanged = (finalTitle && String(st?.lastTitle) !== String(finalTitle));
 
     let priceReq = Number(req.query.price);
     if (!Number.isFinite(priceReq) || priceReq < 100 || priceReq > 65000) priceReq = null;
 
     const priceChanged = (priceReq !== null && Number(st?.lastPrice) !== Number(priceReq));
 
-
-    if (!force && st?.linkActual && st?.expectedExtRef && st?.ultimaPreferencia && !priceChanged) {
+    if (!force && st?.linkActual && st?.expectedExtRef && st?.ultimaPreferencia && !priceChanged && !titleChanged) {
       return res.json({
         dev,
         link: st.linkActual,
-        title: ITEM_BY_DEV[dev].title,
+        title: st.lastTitle || ITEM_BY_DEV[dev].title,
         price: st.lastPrice,
         external_reference: st.expectedExtRef,
         preference_id: st.ultimaPreferencia,
@@ -392,12 +422,12 @@ app.get('/nuevo-link', async (req, res) => {
     let price = Number(req.query.price);
     if (!Number.isFinite(price) || price < 100 || price > 65000) price = undefined;
 
-    const info = await generarNuevoLinkParaDev(dev, price);
+    const info = await generarNuevoLinkParaDev(dev, price, finalTitle);
 
     res.json({
       dev,
       link: info.link,
-      title: ITEM_BY_DEV[dev].title,
+      title: stateByDev[dev].lastTitle || ITEM_BY_DEV[dev].title,
       price: info.price,
       external_reference: info.external_reference,
       preference_id: info.preference_id,
@@ -429,42 +459,111 @@ app.get('/ack', (req, res) => {
   const st = stateByDev[dev];
   if (st.paidEvent && String(st.paidEvent.payment_id) === payment_id) {
     st.paidEvent = null;
-
-    // ✅ persistir state
     saveState(stateByDev);
-
     return res.json({ ok: true });
   }
   res.json({ ok: false });
 });
 
+app.post('/set-item', (req, res) => {
+  try {
+    const dev = String(req.body.dev || '').toLowerCase();
+    if (!ALLOWED_DEVS.includes(dev)) {
+      return res.status(400).json({ error: 'dev invalido' });
+    }
+
+    let price = Number(req.body.price);
+    if (!Number.isFinite(price) || price < 100 || price > 65000) {
+      return res.status(400).json({ error: 'price invalido' });
+    }
+
+    let title = String(req.body.title || '').trim();
+    if (title.length < 2 || title.length > 60) {
+      return res.status(400).json({ error: 'title invalido (2..60)' });
+    }
+
+    stateByDev[dev].lastPrice = price;
+    stateByDev[dev].lastTitle = title;
+    stateByDev[dev].paidEvent = null;
+
+    saveState(stateByDev);
+
+    recargarLinkConReintento(dev);
+
+    res.json({ ok: true, dev, price, title });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/panel', (req, res) => {
+  const st4 = stateByDev.bar4 || {};
+
   let html = `
-  <html><head><meta charset="utf-8" />
-  <title>Panel QdRink</title>
-  <style>
-    body { font-family: sans-serif; background:#111; color:#eee; padding: 10px; }
-    a { color: #9ad; }
-    table { border-collapse: collapse; width: 100%; margin-top: 10px; }
-    th, td { border: 1px solid #444; padding: 6px 8px; font-size: 13px; }
-    th { background: #222; }
-    tr:nth-child(even) { background:#1b1b1b; }
-    .muted { color:#aaa; font-size: 12px; }
-    .box { background:#181818; border:1px solid #333; padding:10px; border-radius: 6px; }
-  </style>
-  </head><body>
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Panel QdRink</title>
+    <style>
+      body { font-family: sans-serif; background:#111; color:#eee; padding: 10px; }
+      a { color: #9ad; }
+      table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+      th, td { border: 1px solid #444; padding: 6px 8px; font-size: 13px; }
+      th { background: #222; }
+      tr:nth-child(even) { background:#1b1b1b; }
+      .muted { color:#aaa; font-size: 12px; }
+      .box { background:#181818; border:1px solid #333; padding:10px; border-radius: 6px; margin-top:10px; }
+      input { padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee; }
+      button { padding:8px 12px; border:none; border-radius:4px; background:#2d6cdf; color:white; cursor:pointer; }
+      button:hover { opacity:0.9; }
+    </style>
+  </head>
+  <body>
     <h1>Panel QdRink</h1>
+
+    <div class="box">
+      <h3>Config Qtiket (bar4)</h3>
+      <form method="post" action="/set-item" onsubmit="return sendForm(event)">
+        <input type="hidden" name="dev" value="bar4" />
+
+        <div style="margin:6px 0;">
+          <label>Título:</label><br/>
+          <input name="title" style="width:320px;" value="${escapeHtml(st4.lastTitle || ITEM_BY_DEV.bar4.title)}" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Precio:</label><br/>
+          <input name="price" style="width:120px;" value="${escapeHtml(String(st4.lastPrice || ITEM_BY_DEV.bar4.unit_price))}" />
+        </div>
+
+        <button type="submit">Guardar y regenerar QR</button>
+        <div class="muted" id="resp" style="margin-top:6px;"></div>
+      </form>
+    </div>
 
     <div class="box">
       <div class="muted">Conectar vendedor (tu socio) por dev:</div>
       <ul>
         <li><a href="/connect?dev=bar2">/connect?dev=bar2</a> (bar2)</li>
         <li><a href="/connect?dev=bar3">/connect?dev=bar3</a> (bar3)</li>
+        <li><a href="/connect?dev=bar4">/connect?dev=bar4</a> (bar4 ✅ OAuth + 3%)</li>
       </ul>
+
       <div class="muted">Tokens guardados (resumen):</div>
-      <pre class="muted">${escapeHtml(JSON.stringify(Object.fromEntries(
-        Object.entries(tokensByDev).map(([k,v]) => [k, { user_id: v.user_id, updated_at: v.updated_at, expires_at: v.expires_at }])
-      ), null, 2))}</pre>
+      <pre class="muted">${escapeHtml(JSON.stringify(
+        Object.fromEntries(
+          Object.entries(tokensByDev).map(([k, v]) => [
+            k,
+            {
+              user_id: v.user_id,
+              updated_at: v.updated_at,
+              expires_at: v.expires_at
+            }
+          ])
+        ),
+        null,
+        2
+      ))}</pre>
 
       <div class="muted">Paths:</div>
       <pre class="muted">${escapeHtml(JSON.stringify({
@@ -477,34 +576,72 @@ app.get('/panel', (req, res) => {
       }, null, 2))}</pre>
     </div>
 
-    <div class="muted">Estado actual por dev:</div>
-    <pre class="muted">${escapeHtml(JSON.stringify(stateByDev, null, 2))}</pre>
+    <div class="box">
+      <div class="muted">Estado actual por dev:</div>
+      <pre class="muted">${escapeHtml(JSON.stringify(stateByDev, null, 2))}</pre>
+    </div>
 
     <table>
       <tr>
-        <th>Fecha/Hora</th><th>Dev</th><th>Producto</th><th>Monto</th>
-        <th>Email</th><th>Estado</th><th>Medio</th><th>payment_id</th><th>pref_id</th><th>ext_ref</th>
+        <th>Fecha/Hora</th>
+        <th>Dev</th>
+        <th>Producto</th>
+        <th>Monto</th>
+        <th>Email</th>
+        <th>Estado</th>
+        <th>Medio</th>
+        <th>payment_id</th>
+        <th>pref_id</th>
+        <th>ext_ref</th>
       </tr>
   `;
 
   pagos.slice().reverse().forEach((p) => {
     html += `
       <tr>
-        <td>${escapeHtml(p.fechaHora)}</td>
-        <td>${escapeHtml(p.dev)}</td>
-        <td>${escapeHtml(p.title)}</td>
-        <td>${escapeHtml(p.monto)}</td>
-        <td>${escapeHtml(p.email)}</td>
-        <td>${escapeHtml(p.estado)}</td>
-        <td>${escapeHtml(p.metodo)}</td>
-        <td>${escapeHtml(p.payment_id)}</td>
-        <td>${escapeHtml(p.preference_id || '')}</td>
-        <td>${escapeHtml(p.external_reference || '')}</td>
+        <td>${escapeHtml(String(p.fechaHora || ''))}</td>
+        <td>${escapeHtml(String(p.dev || ''))}</td>
+        <td>${escapeHtml(String(p.title || ''))}</td>
+        <td>${escapeHtml(String(p.monto || ''))}</td>
+        <td>${escapeHtml(String(p.email || ''))}</td>
+        <td>${escapeHtml(String(p.estado || ''))}</td>
+        <td>${escapeHtml(String(p.metodo || ''))}</td>
+        <td>${escapeHtml(String(p.payment_id || ''))}</td>
+        <td>${escapeHtml(String(p.preference_id || ''))}</td>
+        <td>${escapeHtml(String(p.external_reference || ''))}</td>
       </tr>
     `;
   });
 
-  html += `</table></body></html>`;
+  html += `
+    </table>
+
+    <script>
+      async function sendForm(ev) {
+        ev.preventDefault();
+
+        const fd = new FormData(ev.target);
+        const body = {
+          dev: fd.get('dev'),
+          title: fd.get('title'),
+          price: Number(fd.get('price'))
+        };
+
+        const r = await fetch('/set-item', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+
+        const j = await r.json();
+        document.getElementById('resp').textContent = JSON.stringify(j);
+        return false;
+      }
+    </script>
+  </body>
+  </html>
+  `;
+
   res.send(html);
 });
 
@@ -594,47 +731,49 @@ app.post('/ipn', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ✅ validar por externalRef O preference_id
     const st = devValido ? stateByDev[dev] : null;
     const okExt = !!(st && externalRef && externalRef === st.expectedExtRef);
     const okPref = !!(st && preference_id && preference_id === st.ultimaPreferencia);
 
     if (devValido && (okExt || okPref)) {
-      st.paidEvent = {
-        payment_id: String(paymentId),
-        at: Date.now(),
-        monto,
-        metodo,
-        email,
-        extRef: externalRef,
-      };
+    const fechaHora = nowAR();
 
-      // ✅ persistir state
-      saveState(stateByDev);
+    st.paidEvent = {
+      payment_id: String(paymentId),
+      at: Date.now(),
+      fechaHora, // ✅ para imprimir en el ticket sin RTC
+      monto,
+      metodo,
+      email,
+      extRef: externalRef,
+      title: stateByDev[dev].lastTitle || ITEM_BY_DEV[dev].title,
+      price: stateByDev[dev].lastPrice || ITEM_BY_DEV[dev].unit_price
+    };
 
-      processedPayments.add(String(paymentId));
+    saveState(stateByDev);
+    processedPayments.add(String(paymentId));
 
-      const fechaHora = nowAR();
-      console.log(`✅ Pago confirmado y válido para ${dev} (guardado hasta ACK)`);
+    console.log(`✅ Pago confirmado y válido para ${dev} (guardado hasta ACK)`);
 
-      const registro = {
-        fechaHora,
-        dev,
-        email,
-        estado,
-        monto,
-        metodo,
-        descripcion,
-        payment_id: String(paymentId),
-        preference_id,
-        external_reference: externalRef,
-        title: ITEM_BY_DEV[dev].title,
-      };
-      pagos.push(registro);
+    // y acá seguís igual con el registro para la tabla:
+    const registro = {
+      fechaHora,
+      dev,
+      email,
+      estado,
+      monto,
+      metodo,
+      descripcion,
+      payment_id: String(paymentId),
+      preference_id,
+      external_reference: externalRef,
+      title: stateByDev[dev].lastTitle || ITEM_BY_DEV[dev].title,
+    };
+    pagos.push(registro);
 
       const logMsg =
        `🕒 ${fechaHora} | Dev: ${dev}` +
-       ` | Producto: ${ITEM_BY_DEV[dev].title}` +
+       ` | Producto: ${(stateByDev[dev].lastTitle || ITEM_BY_DEV[dev].title)}` +
        ` | Monto: ${monto}` +
        ` | Pago de: ${email}` +
        ` | Estado: ${estado}` +
@@ -685,7 +824,7 @@ app.listen(PORT, () => {
       return;
     }
 
-    // (si en el futuro agregás devs OAuth)
+    // ✅ bar4 OAuth: solo si ya hay token
     if (!tokensByDev[dev]?.access_token) {
       console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
       return;
