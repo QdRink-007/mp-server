@@ -1,5 +1,5 @@
 // index.js – QdRink multi-BAR + OAuth Marketplace (PRODUCCION)
-// - OAuth connect por dev (bar4)
+// - OAuth connect por dev (bar4, bar5)
 // - Usa token del vendedor para crear preferencias
 // - marketplace_fee para comisión
 // - IPN intenta leer payment con token correcto (fallback)
@@ -46,12 +46,13 @@ const MARKETPLACE_FEE_PERCENT_BY_DEV = {
   bar2: 0,     // bar2 cobra a tu cuenta (directo) → sin comisión
   bar3: 0,     // bar3 cobra a tu cuenta (directo) → sin comisión
   bar4: 0.03,  // ✅ bar4: 3% para vos (marketplace_fee)
+  bar5: 0.03,
 };
 
 const MARKETPLACE_FEE_MIN = 10; // piso mínimo en pesos
 
 // ✅ Agregamos bar4
-const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3', 'bar4'];
+const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3', 'bar4', 'bar5'];
 
 const ITEM_BY_DEV = {
   bar1: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 100 },
@@ -59,6 +60,7 @@ const ITEM_BY_DEV = {
   bar3: { title: 'Stella Artois', quantity: 1, currency_id: 'ARS', unit_price: 120 },
   // ✅ Default para bar4 (después lo pisás con ?price=)
   bar4: { title: 'Qtiket', quantity: 1, currency_id: 'ARS', unit_price: 4500 },
+  bar5: { title: 'Qtiket', quantity: 1, currency_id: 'ARS', unit_price: 4500 },
 };
 
 // ================== TOKENS STORE (por dev) ==================
@@ -484,6 +486,7 @@ app.post('/set-item', (req, res) => {
 
 app.get('/panel', (req, res) => {
   const st4 = stateByDev.bar4 || {};
+  const st5 = stateByDev.bar5 || {};
 
   let html = `
   <html>
@@ -528,11 +531,32 @@ app.get('/panel', (req, res) => {
     </div>
 
     <div class="box">
+      <h3>Config Qtiket (bar5)</h3>
+      <form method="post" action="/set-item" onsubmit="return sendForm(event)">
+        <input type="hidden" name="dev" value="bar5" />
+
+        <div style="margin:6px 0;">
+          <label>Título:</label><br/>
+          <input name="title" style="width:320px;" value="${escapeHtml(st5.lastTitle || ITEM_BY_DEV.bar5.title)}" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Precio:</label><br/>
+          <input name="price" style="width:120px;" value="${escapeHtml(String(st5.lastPrice || ITEM_BY_DEV.bar5.unit_price))}" />
+        </div>
+
+        <button type="submit">Guardar y regenerar QR</button>
+        <div class="muted" id="resp5" style="margin-top:6px;"></div>
+      </form>
+    </div>
+
+    <div class="box">
       <div class="muted">Conectar vendedor (tu socio) por dev:</div>
       <ul>
         <li><a href="/connect?dev=bar2">/connect?dev=bar2</a> (bar2)</li>
         <li><a href="/connect?dev=bar3">/connect?dev=bar3</a> (bar3)</li>
         <li><a href="/connect?dev=bar4">/connect?dev=bar4</a> (bar4 ✅ OAuth + 3%)</li>
+        <li><a href="/connect?dev=bar5">/connect?dev=bar5</a> (bar5 ✅ OAuth + 3%)</li>
       </ul>
 
       <div class="muted">Tokens guardados (resumen):</div>
@@ -607,8 +631,10 @@ app.get('/panel', (req, res) => {
         ev.preventDefault();
 
         const fd = new FormData(ev.target);
+        const dev = fd.get('dev');
+
         const body = {
-          dev: fd.get('dev'),
+          dev,
           title: fd.get('title'),
           price: Number(fd.get('price'))
         };
@@ -620,7 +646,10 @@ app.get('/panel', (req, res) => {
         });
 
         const j = await r.json();
-        document.getElementById('resp').textContent = JSON.stringify(j);
+
+        const outId = (dev === 'bar5') ? 'resp5' : 'resp';
+        document.getElementById(outId).textContent = JSON.stringify(j);
+
         return false;
       }
     </script>
