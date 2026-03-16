@@ -75,6 +75,25 @@ const ITEM_BY_DEV = {
   bar5: { title: 'Qtiket', quantity: 1, currency_id: 'ARS', unit_price: 4500 },
 };
 
+// ================== middleware ==================
+
+function requireAdmin(req, res, next) {
+  const provided =
+    req.query.key ||
+    req.headers['x-admin-key'] ||
+    req.body?.admin_key;
+
+  if (!ADMIN_KEY) {
+    return res.status(500).send('ADMIN_KEY no configurada');
+  }
+
+  if (provided !== ADMIN_KEY) {
+    return res.status(401).send('No autorizado');
+  }
+
+  next();
+}
+
 // ================== TOKENS STORE (por dev) ==================
 
 const TOKENS_PATH = path.join(DATA_DIR, 'tokens.json');
@@ -465,7 +484,7 @@ app.get('/ack', (req, res) => {
   res.json({ ok: false });
 });
 
-app.post('/set-item', (req, res) => {
+app.post('/set-item', requireAdmin, (req, res) => {
   try {
     const dev = String(req.body.dev || '').toLowerCase();
     if (!ALLOWED_DEVS.includes(dev)) {
@@ -496,7 +515,7 @@ app.post('/set-item', (req, res) => {
   }
 });
 
-app.get('/panel', (req, res) => {
+app.get('/panel', requireAdmin, (req, res) => {
   const st4 = stateByDev.bar4 || {};
   const st5 = stateByDev.bar5 || {};
 
