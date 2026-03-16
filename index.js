@@ -658,6 +658,8 @@ app.get('/panel', requireAdmin, (req, res) => {
     </table>
 
     <script>
+      const ADMIN_KEY = new URLSearchParams(location.search).get('key') || '';
+
       async function sendForm(ev) {
         ev.preventDefault();
 
@@ -672,7 +674,10 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         const r = await fetch('/set-item', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-key': ADMIN_KEY
+          },
           body: JSON.stringify(body)
         });
 
