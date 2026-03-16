@@ -589,37 +589,6 @@ app.get('/panel', requireAdmin, (req, res) => {
         <li><a href="/connect?dev=bar4">/connect?dev=bar4</a> (bar4 ✅ OAuth + 3%)</li>
         <li><a href="/connect?dev=bar5">/connect?dev=bar5</a> (bar5 ✅ OAuth + 3%)</li>
       </ul>
-
-      <div class="muted">Tokens guardados (resumen):</div>
-      <pre class="muted">${escapeHtml(JSON.stringify(
-        Object.fromEntries(
-          Object.entries(tokensByDev).map(([k, v]) => [
-            k,
-            {
-              user_id: v.user_id,
-              updated_at: v.updated_at,
-              expires_at: v.expires_at
-            }
-          ])
-        ),
-        null,
-        2
-      ))}</pre>
-
-      <div class="muted">Paths:</div>
-      <pre class="muted">${escapeHtml(JSON.stringify({
-        DATA_DIR,
-        TOKENS_PATH,
-        STATE_PATH,
-        PAYLOG_PATH,
-        tokens_exists: fs.existsSync(TOKENS_PATH),
-        state_exists: fs.existsSync(STATE_PATH),
-      }, null, 2))}</pre>
-    </div>
-
-    <div class="box">
-      <div class="muted">Estado actual por dev:</div>
-      <pre class="muted">${escapeHtml(JSON.stringify(stateByDev, null, 2))}</pre>
     </div>
 
     <table>
