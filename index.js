@@ -1,6 +1,6 @@
 // index.js – QdRink multi-BAR + OAuth Marketplace (PRODUCCION)
 // - OAuth connect por dev (bar4, bar5)
-// - Usa token del vendedor para crear preferencias
+// - Usa token del vendedor para crear preferencias 
 // - marketplace_fee para comisión
 // - IPN intenta leer payment con token correcto (fallback)
 // - refresh automático con refresh_token (offline_access)
@@ -21,18 +21,30 @@ app.use(bodyParser.json());
 
 // ================== CONFIG ==================
 
-const ACCESS_TOKEN =
-  process.env.MP_ACCESS_TOKEN ||
-  'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // ⚠️ mejor en ENV
-
-const MP_CLIENT_ID = process.env.MP_CLIENT_ID || '5741144054953865';
-const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || 'ET5bOFcRSRzgdDQU7G8qT7UydoELzA3b';
-const MP_REDIRECT_URI =
-  process.env.MP_REDIRECT_URI || 'https://mp-server-c1mg.onrender.com/oauth/callback';
+const ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
+const MP_CLIENT_ID = process.env.MP_CLIENT_ID;
+const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET;
+const MP_REDIRECT_URI = process.env.MP_REDIRECT_URI;
 
 const ROTATE_DELAY_MS = Number(process.env.ROTATE_DELAY_MS || 5000);
-const WEBHOOK_URL =
-  process.env.WEBHOOK_URL || 'https://mp-server-c1mg.onrender.com/ipn';
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const ADMIN_KEY = process.env.ADMIN_KEY;
+
+const REQUIRED_ENVS = [
+  'MP_ACCESS_TOKEN',
+  'MP_CLIENT_ID',
+  'MP_CLIENT_SECRET',
+  'MP_REDIRECT_URI',
+  'WEBHOOK_URL',
+  'ADMIN_KEY',
+];
+
+for (const name of REQUIRED_ENVS) {
+  if (!process.env[name]) {
+    console.error(`❌ Falta variable de entorno obligatoria: ${name}`);
+    process.exit(1);
+  }
+}
 
 // ✅ Render Disk mount
 const DATA_DIR = process.env.DATA_DIR || '/var/data';
