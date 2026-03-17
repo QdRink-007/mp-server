@@ -94,9 +94,12 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// ================== TOKENS STORE (por dev) ==================
+// ================== TOKENS / STATE / DEVICES STORE ==================
 
 const TOKENS_PATH = path.join(DATA_DIR, 'tokens.json');
+const STATE_PATH = path.join(DATA_DIR, 'stateByDev.json');
+const PAYLOG_PATH = path.join(DATA_DIR, 'pagos.log');
+const DEVICES_PATH = path.join(DATA_DIR, 'devices.json');
 
 function loadTokens() {
   try {
@@ -116,15 +119,6 @@ function saveTokens(obj) {
   }
 }
 
-// tokensByDev[dev] = { access_token, refresh_token, expires_at, user_id, ... }
-let tokensByDev = loadTokens();
-console.log('🔑 tokens.json existe?', fs.existsSync(TOKENS_PATH));
-console.log('🔑 tokens cargados:', Object.keys(tokensByDev));
-
-// ================== STATE STORE (por dev) ==================
-
-const STATE_PATH = path.join(DATA_DIR, 'stateByDev.json');
-
 function loadState() {
   try {
     if (!fs.existsSync(STATE_PATH)) return {};
@@ -133,6 +127,61 @@ function loadState() {
     console.error('❌ No pude leer stateByDev.json:', e.message);
     return {};
   }
+}
+
+function saveState(obj) {
+  try {
+    fs.writeFileSync(STATE_PATH, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.error('❌ No pude guardar stateByDev.json:', e.message);
+  }
+}
+
+function loadDevices() {
+  try {
+    if (!fs.existsSync(DEVICES_PATH)) {
+      const initial = { devices: {} };
+      fs.writeFileSync(DEVICES_PATH, JSON.stringify(initial, null, 2));
+      return initial;
+    }
+
+    const raw = fs.readFileSync(DEVICES_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('devices.json inválido');
+    }
+
+    if (!parsed.devices || typeof parsed.devices !== 'object') {
+      parsed.devices = {};
+    }
+
+    return parsed;
+  } catch (e) {
+    console.error('❌ Error cargando devices.json:', e.message);
+    return { devices: {} };
+  }
+}
+
+function saveDevices(devicesData) {
+  try {
+    fs.writeFileSync(DEVICES_PATH, JSON.stringify(devicesData, null, 2));
+  } catch (e) {
+    console.error('❌ No pude guardar devices.json:', e.message);
+  }
+}
+
+// tokensByDev[dev] = { access_token, refresh_token, expires_at, user_id, ... }
+let tokensByDev = loadTokens();
+let devicesData = loadDevices();
+
+console.log('🔑 tokens.json existe?', fs.existsSync(TOKENS_PATH));
+console.log('🔑 tokens cargados:', Object.keys(tokensByDev));
+console.log('🧩 devices.json existe?', fs.existsSync(DEVICES_PATH));
+console.log('🧩 devices cargados:', Object.keys(devicesData.devices || {}));
+
+function getDevices() {
+  return devicesData.devices || {};
 }
 
 function saveState(obj) {
@@ -165,9 +214,6 @@ console.log('📦 stateByDev cargado:', Object.keys(stateByDev));
 
 const pagos = [];
 const processedPayments = new Set();
-
-// ✅ pagos.log persistente
-const PAYLOG_PATH = path.join(DATA_DIR, 'pagos.log');
 
 // ================== HELPERS ==================
 
