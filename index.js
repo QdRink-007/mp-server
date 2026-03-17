@@ -138,11 +138,37 @@ function saveState(obj) {
 }
 
 function loadDevices() {
+  const seed = {
+    devices: {
+      bar1: {
+        client_id: 'mariano',
+        title: 'Quilmes',
+        quantity: 1,
+        currency_id: 'ARS',
+        unit_price: 3000,
+        fee_pct: 0,
+        token_mode: 'main_account',
+        enabled: true,
+        kind: 'beer_tap'
+      },
+      bar4: {
+        client_id: 'socio1',
+        title: 'Qtiket',
+        quantity: 1,
+        currency_id: 'ARS',
+        unit_price: 4500,
+        fee_pct: 0.03,
+        token_mode: 'oauth_seller',
+        enabled: true,
+        kind: 'ticket'
+      }
+    }
+  };
+
   try {
     if (!fs.existsSync(DEVICES_PATH)) {
-      const initial = { devices: {} };
-      fs.writeFileSync(DEVICES_PATH, JSON.stringify(initial, null, 2));
-      return initial;
+      fs.writeFileSync(DEVICES_PATH, JSON.stringify(seed, null, 2));
+      return seed;
     }
 
     const raw = fs.readFileSync(DEVICES_PATH, 'utf8');
@@ -156,10 +182,15 @@ function loadDevices() {
       parsed.devices = {};
     }
 
+    if (Object.keys(parsed.devices).length === 0) {
+      fs.writeFileSync(DEVICES_PATH, JSON.stringify(seed, null, 2));
+      return seed;
+    }
+
     return parsed;
   } catch (e) {
     console.error('❌ Error cargando devices.json:', e.message);
-    return { devices: {} };
+    return seed;
   }
 }
 
@@ -184,6 +215,22 @@ function getDevices() {
   return devicesData.devices || {};
 }
 
+function getDevice(dev) {
+  const devices = getDevices();
+  return devices[String(dev || '').toLowerCase()] || null;
+}
+
+function isDeviceEnabled(dev) {
+  const d = getDevice(dev);
+  return !!(d && d.enabled === true);
+}
+
+function getAllowedDevs() {
+  return Object.entries(getDevices())
+    .filter(([, cfg]) => cfg && cfg.enabled === true)
+    .map(([dev]) => dev);
+}
+
 function saveState(obj) {
   try {
     fs.writeFileSync(STATE_PATH, JSON.stringify(obj, null, 2));
@@ -196,8 +243,10 @@ function saveState(obj) {
 
 const stateByDev = loadState();
 
-// asegurar defaults por cada dev
-ALLOWED_DEVS.forEach((dev) => {
+// asegurar defaults por cada dev habilitado en devices.json
+getAllowedDevs().forEach((dev) => {
+  const cfg = getDevice(dev) || {};
+
   if (!stateByDev[dev]) stateByDev[dev] = {};
   stateByDev[dev] = {
     paidEvent: stateByDev[dev].paidEvent ?? null,
@@ -205,12 +254,13 @@ ALLOWED_DEVS.forEach((dev) => {
     ultimaPreferencia: stateByDev[dev].ultimaPreferencia ?? null,
     linkActual: stateByDev[dev].linkActual ?? null,
     rotateScheduled: false,
-    lastPrice: Number(stateByDev[dev].lastPrice ?? ITEM_BY_DEV[dev].unit_price),
-    lastTitle: String(stateByDev[dev].lastTitle ?? ITEM_BY_DEV[dev].title),
+    lastPrice: Number(stateByDev[dev].lastPrice ?? cfg.unit_price ?? 100),
+    lastTitle: String(stateByDev[dev].lastTitle ?? cfg.title ?? 'Producto'),
   };
 });
 
 console.log('📦 stateByDev cargado:', Object.keys(stateByDev));
+console.log('🧩 devices habilitados:', getAllowedDevs());
 
 const pagos = [];
 const processedPayments = new Set();
@@ -238,7 +288,7 @@ function escapeHtml(str) {
 
 app.get('/connect', (req, res) => {
   const dev = String(req.query.dev || '').toLowerCase();
-  if (!ALLOWED_DEVS.includes(dev)) return res.status(400).send('dev invalido');
+  if (!isDeviceEnabled(dev)) return res.status(400).send('dev invalido');
 
   const authUrl =
     `https://auth.mercadopago.com.ar/authorization` +
@@ -256,7 +306,7 @@ app.get('/oauth/callback', async (req, res) => {
     const dev = String(req.query.state || '').toLowerCase();
 
     if (!code) return res.status(400).send('Falta code');
-    if (!ALLOWED_DEVS.includes(dev)) return res.status(400).send('State/dev invalido');
+    if (!isDeviceEnabled(dev)) return res.status(400).send('State/dev invalido');
 
     const form = new URLSearchParams();
     form.append('grant_type', 'authorization_code');
@@ -448,7 +498,7 @@ app.get('/', (req, res) => {
 app.get('/nuevo-link', async (req, res) => {
   try {
     const dev = (req.query.dev || '').toLowerCase();
-    if (!ALLOWED_DEVS.includes(dev)) {
+    if (!isDeviceEnabled(dev)) {
       return res.status(400).json({ error: 'dev invalido' });
     }
 
@@ -506,7 +556,7 @@ app.get('/nuevo-link', async (req, res) => {
 
 app.get('/estado', (req, res) => {
   const dev = (req.query.dev || '').toLowerCase();
-  if (!ALLOWED_DEVS.includes(dev)) {
+  if (!isDeviceEnabled(dev)) {
     return res.status(400).json({ error: 'dev invalido' });
   }
 
@@ -518,7 +568,7 @@ app.get('/ack', (req, res) => {
   const dev = (req.query.dev || '').toLowerCase();
   const payment_id = String(req.query.payment_id || '');
 
-  if (!ALLOWED_DEVS.includes(dev)) return res.status(400).json({ error: 'dev invalido' });
+  if (!isDeviceEnabled(dev)) return res.status(400).json({ error: 'dev invalido' });
   if (!payment_id) return res.status(400).json({ error: 'payment_id requerido' });
 
   const st = stateByDev[dev];
@@ -533,7 +583,7 @@ app.get('/ack', (req, res) => {
 app.post('/set-item', requireAdmin, (req, res) => {
   try {
     const dev = String(req.body.dev || '').toLowerCase();
-    if (!ALLOWED_DEVS.includes(dev)) {
+    if (!isDeviceEnabled(dev)) {
       return res.status(400).json({ error: 'dev invalido' });
     }
 
@@ -789,7 +839,7 @@ app.post('/ipn', async (req, res) => {
     console.log('📩 Pago recibido:', { estado, status_detail, email, monto, metodo, externalRef, preference_id });
 
     const dev = (externalRef ? String(externalRef).split(':')[0] : '').toLowerCase();
-    const devValido = ALLOWED_DEVS.includes(dev);
+    const devValido = isDeviceEnabled(dev);
 
     if (estado !== 'approved') {
       console.log(`⚠️ Pago NO aprobado (${estado}). detalle:`, status_detail);
@@ -883,18 +933,19 @@ app.listen(PORT, () => {
   console.log(`Servidor activo en http://localhost:${PORT}`);
   console.log('Generando links iniciales por dev...');
 
-  ALLOWED_DEVS.forEach((dev) => {
-    // ✅ bar1/bar2/bar3 siempre generan (usan tu ACCESS_TOKEN)
+  getAllowedDevs().forEach((dev) => {
+    // por ahora mantenemos la lógica existente:
+    // main_account genera siempre, oauth_seller solo si hay token
     if (dev === 'bar1' || dev === 'bar2' || dev === 'bar3') {
       recargarLinkConReintento(dev);
       return;
     }
 
-    // ✅ bar4 OAuth: solo si ya hay token
     if (!tokensByDev[dev]?.access_token) {
       console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
       return;
     }
+
     recargarLinkConReintento(dev);
   });
 });
