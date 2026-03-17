@@ -632,6 +632,27 @@ app.post('/set-item', requireAdmin, (req, res) => {
   }
 });
 
+app.get('/admin/devices', requireAdmin, (req, res) => {
+  try {
+    const devices = getDevices();
+
+    const out = Object.entries(devices).map(([dev, cfg]) => ({
+      dev,
+      ...cfg,
+      state: stateByDev[dev] || null,
+      oauth_connected: !!tokensByDev[dev]?.access_token,
+    }));
+
+    res.json({
+      ok: true,
+      count: out.length,
+      devices: out
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/panel', requireAdmin, (req, res) => {
   const st4 = stateByDev.bar4 || {};
   const st5 = stateByDev.bar5 || {};
