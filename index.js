@@ -231,6 +231,18 @@ function getAllowedDevs() {
     .map(([dev]) => dev);
 }
 
+function getDeviceItem(dev) {
+  const d = getDevice(dev);
+  if (!d) return null;
+
+  return {
+    title: String(d.title || 'Producto'),
+    quantity: Number(d.quantity || 1),
+    currency_id: String(d.currency_id || 'ARS'),
+    unit_price: Number(d.unit_price || 100),
+  };
+}
+
 function saveState(obj) {
   try {
     fs.writeFileSync(STATE_PATH, JSON.stringify(obj, null, 2));
@@ -378,12 +390,18 @@ async function refreshTokenForDev(dev) {
 }
 
 async function getAccessTokenForDev(dev) {
-  // ✅ bar1/bar2/bar3 cobran a TU cuenta (sin OAuth)
-  if (dev === 'bar1' || dev === 'bar2' || dev === 'bar3') {
+  const cfg = getDevice(dev);
+  if (!cfg) return null;
+
+  if (cfg.token_mode === 'main_account') {
     return ACCESS_TOKEN;
   }
 
-  // ✅ bar4 (y futuros devs) usan OAuth
+  if (cfg.token_mode !== 'oauth_seller') {
+    console.error(`❌ token_mode inválido para ${dev}:`, cfg.token_mode);
+    return null;
+  }
+
   const t = tokensByDev[dev];
   if (!t?.access_token) return null;
 
@@ -404,14 +422,17 @@ async function getAccessTokenForDev(dev) {
 // ================== MP: CREAR PREFERENCIA ==================
 
 async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
-  const baseItem = ITEM_BY_DEV[dev];
+  const cfg = getDevice(dev);
+  if (!cfg) throw new Error(`Device no definido para dev=${dev}`);
+
+  const baseItem = getDeviceItem(dev);
   if (!baseItem) throw new Error(`Item no definido para dev=${dev}`);
 
-  const item = { ...baseItem }; 
- 
+  const item = { ...baseItem };
+
   if (typeof titleOverride === 'string') {
     const t = titleOverride.trim();
-  if (t.length >= 2 && t.length <= 60) item.title = t;
+    if (t.length >= 2 && t.length <= 60) item.title = t;
   }
 
   if (Number.isFinite(priceOverride) && priceOverride >= 100 && priceOverride <= 65000) {
@@ -420,13 +441,13 @@ async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
 
   const sellerToken = await getAccessTokenForDev(dev);
   if (!sellerToken) {
-    throw new Error(`Dev ${dev} no está conectado por OAuth (no hay token vendedor)`);
+    throw new Error(`Dev ${dev} no tiene token disponible para cobrar`);
   }
 
   const headers = { Authorization: `Bearer ${sellerToken}` };
   const extRef = buildUniqueExtRef(dev);
 
-  const pct = Number(MARKETPLACE_FEE_PERCENT_BY_DEV[dev] || 0);
+  const pct = Number(cfg.fee_pct || 0);
 
   let fee = Math.round(item.unit_price * pct);
   if (pct > 0) fee = Math.max(MARKETPLACE_FEE_MIN, fee);
@@ -447,6 +468,8 @@ async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
   const pref = res.data;
   const prefId = pref.id || pref.preference_id;
 
+  if (!stateByDev[dev]) stateByDev[dev] = {};
+
   stateByDev[dev].ultimaPreferencia = prefId;
   stateByDev[dev].linkActual = pref.init_point;
   stateByDev[dev].expectedExtRef = extRef;
@@ -463,7 +486,12 @@ async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
     marketplace_fee: fee,
   });
 
-  return { preference_id: prefId, external_reference: extRef, link: pref.init_point, price: item.unit_price };
+  return {
+    preference_id: prefId,
+    external_reference: extRef,
+    link: pref.init_point,
+    price: item.unit_price
+  };
 }
 
 function recargarLinkConReintento(dev, intento = 1) {
@@ -473,7 +501,7 @@ function recargarLinkConReintento(dev, intento = 1) {
   generarNuevoLinkParaDev(
     dev,
     stateByDev[dev]?.lastPrice,
-    stateByDev[dev]?.lastTitle || ITEM_BY_DEV[dev].title
+    stateByDev[dev]?.lastTitle || getDevice(dev)?.title || 'Producto'
   ).catch((err) => {
     console.error(
       `❌ Error al regenerar link para ${dev} (intento ${intento}):`,
@@ -514,7 +542,7 @@ app.get('/nuevo-link', async (req, res) => {
     }
 
     // si no mandan title por query, usa el último guardado
-    const finalTitle = titleReq ?? String(st?.lastTitle ?? ITEM_BY_DEV[dev].title);
+    const finalTitle = titleReq ?? String(st?.lastTitle ?? getDevice(dev)?.title ?? 'Producto');
     const titleChanged = (finalTitle && String(st?.lastTitle) !== String(finalTitle));
 
     let priceReq = Number(req.query.price);
@@ -526,7 +554,7 @@ app.get('/nuevo-link', async (req, res) => {
       return res.json({
         dev,
         link: st.linkActual,
-        title: st.lastTitle || ITEM_BY_DEV[dev].title,
+        title: st.lastTitle || getDevice(dev)?.title || 'Producto',
         price: st.lastPrice,
         external_reference: st.expectedExtRef,
         preference_id: st.ultimaPreferencia,
@@ -542,7 +570,7 @@ app.get('/nuevo-link', async (req, res) => {
     res.json({
       dev,
       link: info.link,
-      title: stateByDev[dev].lastTitle || ITEM_BY_DEV[dev].title,
+      title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
       price: info.price,
       external_reference: info.external_reference,
       preference_id: info.preference_id,
@@ -644,12 +672,12 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         <div style="margin:6px 0;">
           <label>Título:</label><br/>
-          <input name="title" style="width:320px;" value="${escapeHtml(st4.lastTitle || ITEM_BY_DEV.bar4.title)}" />
+          <input name="title" style="width:320px;" value="${escapeHtml(st4.lastTitle || getDevice('bar4')?.title || 'Producto')}" />
         </div>
 
         <div style="margin:6px 0;">
           <label>Precio:</label><br/>
-          <input name="price" style="width:120px;" value="${escapeHtml(String(st4.lastPrice || ITEM_BY_DEV.bar4.unit_price))}" />
+          <input name="price" style="width:120px;" value="${escapeHtml(String(st4.lastPrice || getDevice('bar4')?.unit_price || 100))}" />
         </div>
 
         <button type="submit">Guardar y regenerar QR</button>
@@ -664,12 +692,12 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         <div style="margin:6px 0;">
           <label>Título:</label><br/>
-          <input name="title" style="width:320px;" value="${escapeHtml(st5.lastTitle || ITEM_BY_DEV.bar5.title)}" />
+          <input name="title" style="width:320px;" value="${escapeHtml(st5.lastTitle || getDevice('bar5')?.title || 'Producto')}" />
         </div>
 
         <div style="margin:6px 0;">
           <label>Precio:</label><br/>
-          <input name="price" style="width:120px;" value="${escapeHtml(String(st5.lastPrice || ITEM_BY_DEV.bar5.unit_price))}" />
+          <input name="price" style="width:120px;" value="${escapeHtml(String(st5.lastPrice || getDevice('bar5')?.unit_price || 100))}" />
         </div>
 
         <button type="submit">Guardar y regenerar QR</button>
@@ -862,8 +890,8 @@ app.post('/ipn', async (req, res) => {
       metodo,
       email,
       extRef: externalRef,
-      title: stateByDev[dev].lastTitle || ITEM_BY_DEV[dev].title,
-      price: stateByDev[dev].lastPrice || ITEM_BY_DEV[dev].unit_price
+      title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
+      price: stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100
     };
 
     saveState(stateByDev);
@@ -883,20 +911,20 @@ app.post('/ipn', async (req, res) => {
       payment_id: String(paymentId),
       preference_id,
       external_reference: externalRef,
-      title: stateByDev[dev].lastTitle || ITEM_BY_DEV[dev].title,
+      title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
     };
     pagos.push(registro);
 
       const logMsg =
        `🕒 ${fechaHora} | Dev: ${dev}` +
-       ` | Producto: ${(stateByDev[dev].lastTitle || ITEM_BY_DEV[dev].title)}` +
+       ` | Producto: ${(stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto')}` +
        ` | Monto: ${monto}` +
        ` | Pago de: ${email}` +
        ` | Estado: ${estado}` +
        ` | extRef: ${externalRef}` +
        ` | pref: ${preference_id}` +
        ` | id: ${paymentId}` +
-       ` | price: ${stateByDev[dev].lastPrice || ITEM_BY_DEV[dev].unit_price}\n`;
+       ` | price: ${stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100}\n`;
 
       fs.appendFileSync(PAYLOG_PATH, logMsg);
 
@@ -934,18 +962,24 @@ app.listen(PORT, () => {
   console.log('Generando links iniciales por dev...');
 
   getAllowedDevs().forEach((dev) => {
-    // por ahora mantenemos la lógica existente:
-    // main_account genera siempre, oauth_seller solo si hay token
-    if (dev === 'bar1' || dev === 'bar2' || dev === 'bar3') {
+    const cfg = getDevice(dev);
+
+    if (!cfg) return;
+
+    if (cfg.token_mode === 'main_account') {
       recargarLinkConReintento(dev);
       return;
     }
 
-    if (!tokensByDev[dev]?.access_token) {
-      console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
+    if (cfg.token_mode === 'oauth_seller') {
+      if (!tokensByDev[dev]?.access_token) {
+        console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
+        return;
+      }
+      recargarLinkConReintento(dev);
       return;
     }
 
-    recargarLinkConReintento(dev);
+    console.log(`⚠️ ${dev} con token_mode inválido: ${cfg.token_mode}`);
   });
 });
