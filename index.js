@@ -823,6 +823,62 @@ app.get('/panel', requireAdmin, (req, res) => {
       </ul>
     </div>
 
+    <div class="box">
+      <h3>Crear device</h3>
+      <form onsubmit="return createDevice(event)">
+        <div style="margin:6px 0;">
+          <label>Dev:</label><br/>
+          <input name="dev" style="width:220px;" placeholder="bar6" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Cliente ID:</label><br/>
+          <input name="client_id" style="width:220px;" placeholder="cliente01" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Título:</label><br/>
+          <input name="title" style="width:320px;" placeholder="Andes IPA" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Precio:</label><br/>
+          <input name="unit_price" style="width:120px;" placeholder="3800" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Fee % (ej 0.03):</label><br/>
+          <input name="fee_pct" style="width:120px;" value="0" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Token mode:</label><br/>
+          <select name="token_mode" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="main_account">main_account</option>
+            <option value="oauth_seller">oauth_seller</option>
+          </select>
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Kind:</label><br/>
+          <input name="kind" style="width:220px;" value="beer_tap" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Quantity:</label><br/>
+          <input name="quantity" style="width:120px;" value="1" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Currency:</label><br/>
+          <input name="currency_id" style="width:120px;" value="ARS" />
+        </div>
+
+        <button type="submit">Crear device</button>
+        <div class="muted" id="createResp" style="margin-top:6px;"></div>
+      </form>
+    </div>
+
     <table>
       <tr>
         <th>Fecha/Hora</th>
@@ -889,6 +945,40 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         return false;
       }
+
+      async function createDevice(ev) {
+        ev.preventDefault();
+
+        const fd = new FormData(ev.target); 
+
+        const body = {
+          dev: String(fd.get('dev') || '').trim(),
+          client_id: String(fd.get('client_id') || '').trim(),
+          title: String(fd.get('title') || '').trim(),
+          quantity: Number(fd.get('quantity') || 1),
+          currency_id: String(fd.get('currency_id') || 'ARS').trim(),
+          unit_price: Number(fd.get('unit_price')),
+          fee_pct: Number(fd.get('fee_pct') || 0),
+          token_mode: String(fd.get('token_mode') || '').trim(),
+          enabled: true,
+          kind: String(fd.get('kind') || 'generic').trim()
+        };
+
+        const r = await fetch('/admin/device/create', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-key': ADMIN_KEY
+          },
+          body: JSON.stringify(body)
+        });
+
+        const j = await r.json();
+        document.getElementById('createResp').textContent = JSON.stringify(j);
+
+        return false;
+      }
+     
     </script>
   </body>
   </html>
