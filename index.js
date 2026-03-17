@@ -53,27 +53,8 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 console.log('📦 DATA_DIR:', DATA_DIR);
 
 // Comisión por DEV (porcentaje + piso mínimo)
-const MARKETPLACE_FEE_PERCENT_BY_DEV = {
-  bar1: 0,     // bar1 cobra a tu cuenta → sin comisión
-  bar2: 0,     // bar2 cobra a tu cuenta (directo) → sin comisión
-  bar3: 0,     // bar3 cobra a tu cuenta (directo) → sin comisión
-  bar4: 0.03,  // ✅ bar4: 3% para vos (marketplace_fee)
-  bar5: 0.03,
-};
 
-const MARKETPLACE_FEE_MIN = 10; // piso mínimo en pesos
-
-// ✅ Agregamos bar4
-const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3', 'bar4', 'bar5'];
-
-const ITEM_BY_DEV = {
-  bar1: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 100 },
-  bar2: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 110 },
-  bar3: { title: 'Stella Artois', quantity: 1, currency_id: 'ARS', unit_price: 120 },
-  // ✅ Default para bar4 (después lo pisás con ?price=)
-  bar4: { title: 'Qtiket', quantity: 1, currency_id: 'ARS', unit_price: 4500 },
-  bar5: { title: 'Qtiket', quantity: 1, currency_id: 'ARS', unit_price: 4500 },
-};
+const MARKETPLACE_FEE_MIN = 100; // piso mínimo en pesos
 
 // ================== middleware ==================
 
@@ -135,6 +116,17 @@ function saveState(obj) {
   } catch (e) {
     console.error('❌ No pude guardar stateByDev.json:', e.message);
   }
+}
+
+function pruneStateByDevices(stateObj) {
+  const allowed = new Set(getAllowedDevs());
+  const cleaned = {};
+
+  for (const [dev, value] of Object.entries(stateObj || {})) {
+    if (allowed.has(dev)) cleaned[dev] = value;
+  }
+
+  return cleaned;
 }
 
 function loadDevices() {
@@ -253,7 +245,8 @@ function saveState(obj) {
 
 // ================== ESTADO POR DEV ==================
 
-const stateByDev = loadState();
+const stateByDev = pruneStateByDevices(loadState());
+saveState(stateByDev);
 
 // asegurar defaults por cada dev habilitado en devices.json
 getAllowedDevs().forEach((dev) => {
@@ -642,6 +635,8 @@ app.post('/set-item', requireAdmin, (req, res) => {
 app.get('/panel', requireAdmin, (req, res) => {
   const st4 = stateByDev.bar4 || {};
   const st5 = stateByDev.bar5 || {};
+  const d4 = getDevice('bar4');
+  const d5 = getDevice('bar5');
 
   let html = `
   <html>
@@ -665,53 +660,57 @@ app.get('/panel', requireAdmin, (req, res) => {
   <body>
     <h1>Panel QdRink</h1>
 
+    ${d4 ? `
     <div class="box">
-      <h3>Config Qtiket (bar4)</h3>
+      <h3>Config ${escapeHtml(d4.title || 'bar4')} (bar4)</h3>
       <form method="post" action="/set-item" onsubmit="return sendForm(event)">
         <input type="hidden" name="dev" value="bar4" />
 
         <div style="margin:6px 0;">
           <label>Título:</label><br/>
-          <input name="title" style="width:320px;" value="${escapeHtml(st4.lastTitle || getDevice('bar4')?.title || 'Producto')}" />
+          <input name="title" style="width:320px;" value="${escapeHtml(st4.lastTitle || d4.title || 'Producto')}" />
         </div>
 
         <div style="margin:6px 0;">
           <label>Precio:</label><br/>
-          <input name="price" style="width:120px;" value="${escapeHtml(String(st4.lastPrice || getDevice('bar4')?.unit_price || 100))}" />
+          <input name="price" style="width:120px;" value="${escapeHtml(String(st4.lastPrice || d4.unit_price || 100))}" />
         </div>
 
         <button type="submit">Guardar y regenerar QR</button>
         <div class="muted" id="resp" style="margin-top:6px;"></div>
       </form>
     </div>
+    ` : ''}
 
+    ${d5 ? `
     <div class="box">
-      <h3>Config Qtiket (bar5)</h3>
+      <h3>Config ${escapeHtml(d5.title || 'bar5')} (bar5)</h3>
       <form method="post" action="/set-item" onsubmit="return sendForm(event)">
         <input type="hidden" name="dev" value="bar5" />
 
         <div style="margin:6px 0;">
           <label>Título:</label><br/>
-          <input name="title" style="width:320px;" value="${escapeHtml(st5.lastTitle || getDevice('bar5')?.title || 'Producto')}" />
+          <input name="title" style="width:320px;" value="${escapeHtml(st5.lastTitle || d5.title || 'Producto')}" />
         </div>
 
         <div style="margin:6px 0;">
           <label>Precio:</label><br/>
-          <input name="price" style="width:120px;" value="${escapeHtml(String(st5.lastPrice || getDevice('bar5')?.unit_price || 100))}" />
+          <input name="price" style="width:120px;" value="${escapeHtml(String(st5.lastPrice || d5.unit_price || 100))}" />
         </div>
 
         <button type="submit">Guardar y regenerar QR</button>
         <div class="muted" id="resp5" style="margin-top:6px;"></div>
       </form>
     </div>
+    ` : ''}
 
     <div class="box">
-      <div class="muted">Conectar vendedor (tu socio) por dev:</div>
+      <div class="muted">Conectar vendedor (devices OAuth habilitados):</div>
       <ul>
-        <li><a href="/connect?dev=bar2">/connect?dev=bar2</a> (bar2)</li>
-        <li><a href="/connect?dev=bar3">/connect?dev=bar3</a> (bar3)</li>
-        <li><a href="/connect?dev=bar4">/connect?dev=bar4</a> (bar4 ✅ OAuth + 3%)</li>
-        <li><a href="/connect?dev=bar5">/connect?dev=bar5</a> (bar5 ✅ OAuth + 3%)</li>
+        ${getAllowedDevs()
+          .filter(dev => getDevice(dev)?.token_mode === 'oauth_seller')
+          .map(dev => `<li><a href="/connect?dev=${encodeURIComponent(dev)}">/connect?dev=${escapeHtml(dev)}</a></li>`)
+          .join('')}
       </ul>
     </div>
 
