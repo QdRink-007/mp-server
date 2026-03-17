@@ -653,6 +653,94 @@ app.get('/admin/devices', requireAdmin, (req, res) => {
   }
 });
 
+app.post('/admin/device/create', requireAdmin, (req, res) => {
+  try {
+    const dev = String(req.body.dev || '').trim().toLowerCase();
+    const client_id = String(req.body.client_id || '').trim();
+    const title = String(req.body.title || '').trim();
+    const quantity = Number(req.body.quantity || 1);
+    const currency_id = String(req.body.currency_id || 'ARS').trim().toUpperCase();
+    const unit_price = Number(req.body.unit_price);
+    const fee_pct = Number(req.body.fee_pct || 0);
+    const token_mode = String(req.body.token_mode || '').trim();
+    const enabled = req.body.enabled === false ? false : true;
+    const kind = String(req.body.kind || 'generic').trim();
+
+    if (!/^[a-z0-9_-]{3,40}$/.test(dev)) {
+      return res.status(400).json({ error: 'dev invalido (3..40, a-z0-9_-)' });
+    }
+
+    if (!client_id || client_id.length < 2 || client_id.length > 60) {
+      return res.status(400).json({ error: 'client_id invalido' });
+    }
+
+    if (!title || title.length < 2 || title.length > 60) {
+      return res.status(400).json({ error: 'title invalido' });
+    }
+
+    if (!Number.isFinite(quantity) || quantity < 1 || quantity > 100) {
+      return res.status(400).json({ error: 'quantity invalido' });
+    }
+
+    if (!currency_id || currency_id.length !== 3) {
+      return res.status(400).json({ error: 'currency_id invalido' });
+    }
+
+    if (!Number.isFinite(unit_price) || unit_price < 100 || unit_price > 65000) {
+      return res.status(400).json({ error: 'unit_price invalido' });
+    }
+
+    if (!Number.isFinite(fee_pct) || fee_pct < 0 || fee_pct > 1) {
+      return res.status(400).json({ error: 'fee_pct invalido (usar 0.03 para 3%)' });
+    }
+
+    if (!['main_account', 'oauth_seller'].includes(token_mode)) {
+      return res.status(400).json({ error: 'token_mode invalido' });
+    }
+
+    const devices = getDevices();
+
+    if (devices[dev]) {
+      return res.status(400).json({ error: 'ese dev ya existe' });
+    }
+
+    devicesData.devices[dev] = {
+      client_id,
+      title,
+      quantity,
+      currency_id,
+      unit_price,
+      fee_pct,
+      token_mode,
+      enabled,
+      kind
+    };
+
+    saveDevices(devicesData);
+
+    if (!stateByDev[dev]) {
+      stateByDev[dev] = {
+        paidEvent: null,
+        expectedExtRef: null,
+        ultimaPreferencia: null,
+        linkActual: null,
+        rotateScheduled: false,
+        lastPrice: unit_price,
+        lastTitle: title,
+      };
+      saveState(stateByDev);
+    }
+
+    res.json({
+      ok: true,
+      dev,
+      device: devicesData.devices[dev]
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/panel', requireAdmin, (req, res) => {
   const st4 = stateByDev.bar4 || {};
   const st5 = stateByDev.bar5 || {};
