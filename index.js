@@ -1020,7 +1020,8 @@ app.get('/panel', requireAdmin, (req, res) => {
         });
 
         const j = await r.json();
-        document.getElementById('createResp').textContent = JSON.stringify(j);
+        document.getElementById('createResp').textContent =
+          j.ok ? `OK: ${j.dev} creado` : JSON.stringify(j);
 
         return false;
       }
@@ -1061,7 +1062,8 @@ app.get('/panel', requireAdmin, (req, res) => {
         });
 
         const j = await r.json();
-        document.getElementById('updateResp').textContent = JSON.stringify(j);
+        document.getElementById('updateResp').textContent =
+          j.ok ? `OK: ${j.dev} actualizado` : JSON.stringify(j);
 
         return false;
       }
