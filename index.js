@@ -869,6 +869,62 @@ app.get('/panel', requireAdmin, (req, res) => {
       </form>
     </div>
 
+    <div class="box">
+      <h3>Editar device</h3>
+      <form onsubmit="return updateDevice(event)">
+        <div style="margin:6px 0;">
+          <label>Dev:</label><br/>
+          <input name="dev" style="width:220px;" placeholder="bar6" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Cliente ID:</label><br/>
+          <input name="client_id" style="width:220px;" placeholder="cliente01" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Título:</label><br/>
+          <input name="title" style="width:320px;" placeholder="Andes IPA" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Precio:</label><br/>
+          <input name="unit_price" style="width:120px;" placeholder="3800" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Fee % (ej 0.03):</label><br/>
+          <input name="fee_pct" style="width:120px;" placeholder="0" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Token mode:</label><br/>
+          <select name="token_mode" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="">(sin cambio)</option>
+            <option value="main_account">main_account</option>
+            <option value="oauth_seller">oauth_seller</option>
+          </select>
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Kind:</label><br/>
+          <input name="kind" style="width:220px;" placeholder="beer_tap" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Enabled:</label><br/>
+          <select name="enabled" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="">(sin cambio)</option>
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
+
+        <button type="submit">Actualizar device</button>
+        <div class="muted" id="updateResp" style="margin-top:6px;"></div>
+      </form>
+    </div>
+
     <table>
       <tr>
         <th>Fecha/Hora</th>
@@ -965,6 +1021,47 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         const j = await r.json();
         document.getElementById('createResp').textContent = JSON.stringify(j);
+
+        return false;
+      }
+
+      async function updateDevice(ev) {
+        ev.preventDefault();
+
+        const fd = new FormData(ev.target);
+
+        const body = {
+          dev: String(fd.get('dev') || '').trim()
+        };
+
+        const client_id = String(fd.get('client_id') || '').trim();
+        const title = String(fd.get('title') || '').trim();
+        const unit_price_raw = String(fd.get('unit_price') || '').trim();
+        const fee_pct_raw = String(fd.get('fee_pct') || '').trim();
+        const token_mode = String(fd.get('token_mode') || '').trim();
+        const kind = String(fd.get('kind') || '').trim();
+        const enabled_raw = String(fd.get('enabled') || '').trim();
+
+        if (client_id) body.client_id = client_id;
+        if (title) body.title = title;
+        if (unit_price_raw) body.unit_price = Number(unit_price_raw);
+        if (fee_pct_raw) body.fee_pct = Number(fee_pct_raw);
+        if (token_mode) body.token_mode = token_mode;
+        if (kind) body.kind = kind;
+        if (enabled_raw === 'true') body.enabled = true;
+        if (enabled_raw === 'false') body.enabled = false;
+
+        const r = await fetch('/admin/device/update', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-key': ADMIN_KEY
+          },
+          body: JSON.stringify(body)
+        });
+
+        const j = await r.json();
+        document.getElementById('updateResp').textContent = JSON.stringify(j);
 
         return false;
       }
