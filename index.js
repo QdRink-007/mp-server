@@ -864,16 +864,6 @@ app.get('/panel', requireAdmin, (req, res) => {
           <input name="kind" style="width:220px;" value="beer_tap" />
         </div>
 
-        <div style="margin:6px 0;">
-          <label>Quantity:</label><br/>
-          <input name="quantity" style="width:120px;" value="1" />
-        </div>
-
-        <div style="margin:6px 0;">
-          <label>Currency:</label><br/>
-          <input name="currency_id" style="width:120px;" value="ARS" />
-        </div>
-
         <button type="submit">Crear device</button>
         <div class="muted" id="createResp" style="margin-top:6px;"></div>
       </form>
@@ -955,8 +945,8 @@ app.get('/panel', requireAdmin, (req, res) => {
           dev: String(fd.get('dev') || '').trim(),
           client_id: String(fd.get('client_id') || '').trim(),
           title: String(fd.get('title') || '').trim(),
-          quantity: Number(fd.get('quantity') || 1),
-          currency_id: String(fd.get('currency_id') || 'ARS').trim(),
+          quantity: 1,
+          currency_id: 'ARS',
           unit_price: Number(fd.get('unit_price')),
           fee_pct: Number(fd.get('fee_pct') || 0),
           token_mode: String(fd.get('token_mode') || '').trim(),
