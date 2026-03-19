@@ -815,6 +815,41 @@ app.post('/admin/device/create', requireAdmin, (req, res) => {
   }
 });
 
+app.get('/admin/clients', requireAdmin, (req, res) => {
+  try {
+    const clients = getClients();
+    const devices = getDevices();
+
+    const out = Object.entries(clients).map(([client_id, cfg]) => {
+      const clientDevices = Object.entries(devices)
+        .filter(([, d]) => d?.client_id === client_id)
+        .map(([dev, d]) => ({
+          dev,
+          title: d.title,
+          unit_price: d.unit_price,
+          token_mode: d.token_mode,
+          enabled: d.enabled,
+          kind: d.kind
+        }));
+
+      return {
+        client_id,
+        ...cfg,
+        devices_count: clientDevices.length,
+        devices: clientDevices
+      };
+    });
+
+    res.json({
+      ok: true,
+      count: out.length,
+      clients: out
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/panel', requireAdmin, (req, res) => {
   const st4 = stateByDev.bar4 || {};
   const st5 = stateByDev.bar5 || {};
