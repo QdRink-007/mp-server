@@ -850,6 +850,71 @@ app.get('/admin/clients', requireAdmin, (req, res) => {
   }
 });
 
+app.post('/admin/client/create', requireAdmin, (req, res) => {
+  try {
+    const client_id = String(req.body.client_id || '').trim();
+    const display_name = String(req.body.display_name || '').trim();
+    const plan_type = String(req.body.plan_type || '').trim();
+    const default_fee_pct = Number(req.body.default_fee_pct || 0);
+    const subscription_status = String(req.body.subscription_status || '').trim();
+    const subscription_until_raw = req.body.subscription_until;
+    const active = req.body.active === false ? false : true;
+
+    if (!/^[a-zA-Z0-9_-]{2,60}$/.test(client_id)) {
+      return res.status(400).json({ error: 'client_id invalido (2..60, a-zA-Z0-9_-)' });
+    }
+
+    if (!display_name || display_name.length < 2 || display_name.length > 80) {
+      return res.status(400).json({ error: 'display_name invalido' });
+    }
+
+    if (!['direct', 'marketplace_fee', 'subscription'].includes(plan_type)) {
+      return res.status(400).json({ error: 'plan_type invalido' });
+    }
+
+    if (!Number.isFinite(default_fee_pct) || default_fee_pct < 0 || default_fee_pct > 1) {
+      return res.status(400).json({ error: 'default_fee_pct invalido (usar 0.03 para 3%)' });
+    }
+
+    if (!['active', 'suspended', 'expired'].includes(subscription_status)) {
+      return res.status(400).json({ error: 'subscription_status invalido' });
+    }
+
+    let subscription_until = null;
+    if (subscription_until_raw !== undefined && subscription_until_raw !== null && String(subscription_until_raw).trim() !== '') {
+      const s = String(subscription_until_raw).trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        return res.status(400).json({ error: 'subscription_until invalido (usar YYYY-MM-DD)' });
+      }
+      subscription_until = s;
+    }
+
+    const clients = getClients();
+    if (clients[client_id]) {
+      return res.status(400).json({ error: 'ese client_id ya existe' });
+    }
+
+    clientsData.clients[client_id] = {
+      display_name,
+      plan_type,
+      default_fee_pct,
+      subscription_status,
+      subscription_until,
+      active
+    };
+
+    saveClients(clientsData);
+
+    res.json({
+      ok: true,
+      client_id,
+      client: clientsData.clients[client_id]
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/panel', requireAdmin, (req, res) => {
   const st4 = stateByDev.bar4 || {};
   const st5 = stateByDev.bar5 || {};
