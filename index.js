@@ -81,6 +81,7 @@ const TOKENS_PATH = path.join(DATA_DIR, 'tokens.json');
 const STATE_PATH = path.join(DATA_DIR, 'stateByDev.json');
 const PAYLOG_PATH = path.join(DATA_DIR, 'pagos.log');
 const DEVICES_PATH = path.join(DATA_DIR, 'devices.json');
+const CLIENTS_PATH = path.join(DATA_DIR, 'clients.json');
 
 function loadTokens() {
   try {
@@ -197,11 +198,14 @@ function saveDevices(devicesData) {
 // tokensByDev[dev] = { access_token, refresh_token, expires_at, user_id, ... }
 let tokensByDev = loadTokens();
 let devicesData = loadDevices();
+let clientsData = loadClients();
 
 console.log('🔑 tokens.json existe?', fs.existsSync(TOKENS_PATH));
 console.log('🔑 tokens cargados:', Object.keys(tokensByDev));
 console.log('🧩 devices.json existe?', fs.existsSync(DEVICES_PATH));
 console.log('🧩 devices cargados:', Object.keys(devicesData.devices || {}));
+console.log('👤 clients.json existe?', fs.existsSync(CLIENTS_PATH));
+console.log('👤 clients cargados:', Object.keys(clientsData.clients || {}));
 
 function getDevices() {
   return devicesData.devices || {};
@@ -233,6 +237,74 @@ function getDeviceItem(dev) {
     currency_id: String(d.currency_id || 'ARS'),
     unit_price: Number(d.unit_price || 100),
   };
+}
+
+function loadClients() {
+  const seed = {
+    clients: {
+      mariano: {
+        display_name: 'Mariano',
+        plan_type: 'direct',
+        default_fee_pct: 0,
+        subscription_status: 'active',
+        subscription_until: null,
+        active: true
+      },
+      cliente01: {
+        display_name: 'Cliente 01',
+        plan_type: 'subscription',
+        default_fee_pct: 0.03,
+        subscription_status: 'active',
+        subscription_until: null,
+        active: true
+      }
+    }
+  };
+
+  try {
+    if (!fs.existsSync(CLIENTS_PATH)) {
+      fs.writeFileSync(CLIENTS_PATH, JSON.stringify(seed, null, 2));
+      return seed;
+    }
+
+    const raw = fs.readFileSync(CLIENTS_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('clients.json inválido');
+    }
+
+    if (!parsed.clients || typeof parsed.clients !== 'object') {
+      parsed.clients = {};
+    }
+
+    if (Object.keys(parsed.clients).length === 0) {
+      fs.writeFileSync(CLIENTS_PATH, JSON.stringify(seed, null, 2));
+      return seed;
+    }
+
+    return parsed;
+  } catch (e) {
+    console.error('❌ Error cargando clients.json:', e.message);
+    return seed;
+  }
+}
+
+function getClients() {
+  return clientsData.clients || {};
+}
+
+function getClient(clientId) {
+  const clients = getClients();
+  return clients[String(clientId || '').trim()] || null;
+}
+
+function saveClients(clientsData) {
+  try {
+    fs.writeFileSync(CLIENTS_PATH, JSON.stringify(clientsData, null, 2));
+  } catch (e) {
+    console.error('❌ No pude guardar clients.json:', e.message);
+  }
 }
 
 function saveState(obj) {
@@ -925,6 +997,40 @@ app.get('/panel', requireAdmin, (req, res) => {
       </form>
     </div>
 
+    <div class="box">
+      <h3>Devices actuales</h3>
+      <table>
+        <tr>
+          <th>Dev</th>
+          <th>Cliente</th>
+          <th>Título</th>
+          <th>Precio</th>
+          <th>Fee</th>
+          <th>Token</th>
+          <th>Enabled</th>
+          <th>Kind</th>
+          <th>OAuth</th>
+        </tr>
+        ${getAllowedDevs().map(dev => {
+          const d = getDevice(dev) || {};
+          const oauthConnected = !!tokensByDev[dev]?.access_token;
+          return `
+            <tr>
+              <td>${escapeHtml(dev)}</td>
+              <td>${escapeHtml(String(d.client_id || ''))}</td>
+              <td>${escapeHtml(String(d.title || ''))}</td>
+              <td>${escapeHtml(String(d.unit_price || ''))}</td>
+              <td>${escapeHtml(String(d.fee_pct || 0))}</td>
+              <td>${escapeHtml(String(d.token_mode || ''))}</td>
+              <td>${escapeHtml(String(d.enabled))}</td>
+              <td>${escapeHtml(String(d.kind || ''))}</td>
+              <td>${oauthConnected ? 'sí' : 'no'}</td>
+            </tr>
+          `;
+        }).join('')}
+      </table>
+    </div>
+
     <table>
       <tr>
         <th>Fecha/Hora</th>
@@ -1253,7 +1359,7 @@ app.listen(PORT, () => {
 
     if (!cfg) return;
 
-    if (cfg.token_mode === 'main_account') {
+    if (cfg.token_mode === 'main_accounte') {
       recargarLinkConReintento(dev);
       return;
     }
