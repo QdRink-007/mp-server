@@ -1133,6 +1133,60 @@ app.get('/panel', requireAdmin, (req, res) => {
       </table>
     </div>
 
+    <div class="box">
+      <h3>Crear cliente</h3>
+      <form onsubmit="return createClient(event)">
+        <div style="margin:6px 0;">
+          <label>Client ID:</label><br/>
+          <input name="client_id" style="width:220px;" placeholder="cliente02" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Nombre visible:</label><br/>
+          <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Plan:</label><br/>
+          <select name="plan_type" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="direct">direct</option>
+            <option value="marketplace_fee">marketplace_fee</option>
+            <option value="subscription">subscription</option>
+          </select>
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Fee por defecto (ej 0.03):</label><br/>
+          <input name="default_fee_pct" style="width:120px;" value="0" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Subscription status:</label><br/>
+          <select name="subscription_status" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="active">active</option>
+            <option value="suspended">suspended</option>
+            <option value="expired">expired</option>
+          </select>
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Subscription until (YYYY-MM-DD):</label><br/>
+          <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Active:</label><br/>
+          <select name="active" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
+
+        <button type="submit">Crear cliente</button>
+        <div class="muted" id="createClientResp" style="margin-top:6px;"></div>
+      </form>
+    </div>
+
     <table>
       <tr>
         <th>Fecha/Hora</th>
@@ -1275,6 +1329,40 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         return false;
       }
+
+     async function createClient(ev) {
+       ev.preventDefault();
+
+       const fd = new FormData(ev.target);
+
+       const subscriptionUntil = String(fd.get('subscription_until') || '').trim();
+       const activeRaw = String(fd.get('active') || 'true').trim();
+     
+       const body = {
+         client_id: String(fd.get('client_id') || '').trim(),
+         display_name: String(fd.get('display_name') || '').trim(),
+         plan_type: String(fd.get('plan_type') || '').trim(),
+         default_fee_pct: Number(fd.get('default_fee_pct') || 0),
+         subscription_status: String(fd.get('subscription_status') || '').trim(),
+         subscription_until: subscriptionUntil || null,
+         active: activeRaw === 'true'
+       };
+
+       const r = await fetch('/admin/client/create', {
+         method: 'POST',
+         headers: {
+           'Content-Type': 'application/json',
+           'x-admin-key': ADMIN_KEY
+         },
+         body: JSON.stringify(body)
+       });
+
+       const j = await r.json();
+       document.getElementById('createClientResp').textContent =
+         j.ok ? ('OK: ' + j.client_id + ' creado') : JSON.stringify(j);
+     
+       return false;
+     }
      
     </script>
   </body>
