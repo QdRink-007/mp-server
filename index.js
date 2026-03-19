@@ -458,12 +458,14 @@ async function getAccessTokenForDev(dev) {
   const cfg = getDevice(dev);
   if (!cfg) return null;
 
-  if (cfg.token_mode === 'main_account') {
+  const tokenMode = String(cfg.token_mode || '').trim();
+
+  if (tokenMode === 'main_account') {
     return ACCESS_TOKEN;
   }
 
-  if (cfg.token_mode !== 'oauth_seller') {
-    console.error(`❌ token_mode inválido para ${dev}:`, cfg.token_mode);
+  if (tokenMode !== 'oauth_seller') {
+    console.error(`❌ token_mode inválido para ${dev}:`, JSON.stringify(cfg.token_mode));
     return null;
   }
 
@@ -1359,12 +1361,14 @@ app.listen(PORT, () => {
 
     if (!cfg) return;
 
-    if (cfg.token_mode === 'main_accounte') {
+    const tokenMode = String(cfg.token_mode || '').trim();
+
+    if (tokenMode === 'main_account') {
       recargarLinkConReintento(dev);
       return;
     }
 
-    if (cfg.token_mode === 'oauth_seller') {
+    if (tokenMode === 'oauth_seller') {
       if (!tokensByDev[dev]?.access_token) {
         console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
         return;
@@ -1373,6 +1377,6 @@ app.listen(PORT, () => {
       return;
     }
 
-    console.log(`⚠️ ${dev} con token_mode inválido: ${cfg.token_mode}`);
+    console.log(`⚠️ ${dev} con token_mode inválido: ${JSON.stringify(cfg.token_mode)}`);
   });
 });
