@@ -915,6 +915,83 @@ app.post('/admin/client/create', requireAdmin, (req, res) => {
   }
 });
 
+app.post('/admin/client/update', requireAdmin, (req, res) => {
+  try {
+    const client_id = String(req.body.client_id || '').trim();
+    const current = getClient(client_id);
+
+    if (!current) {
+      return res.status(404).json({ error: 'client_id no existe' });
+    }
+
+    const patch = {};
+
+    if (req.body.display_name !== undefined) {
+      const display_name = String(req.body.display_name || '').trim();
+      if (!display_name || display_name.length < 2 || display_name.length > 80) {
+        return res.status(400).json({ error: 'display_name invalido' });
+      }
+      patch.display_name = display_name;
+    }
+
+    if (req.body.plan_type !== undefined) {
+      const plan_type = String(req.body.plan_type || '').trim();
+      if (!['direct', 'marketplace_fee', 'subscription'].includes(plan_type)) {
+        return res.status(400).json({ error: 'plan_type invalido' });
+      }
+      patch.plan_type = plan_type;
+    }
+
+    if (req.body.default_fee_pct !== undefined) {
+      const default_fee_pct = Number(req.body.default_fee_pct);
+      if (!Number.isFinite(default_fee_pct) || default_fee_pct < 0 || default_fee_pct > 1) {
+        return res.status(400).json({ error: 'default_fee_pct invalido (usar 0.03 para 3%)' });
+      }
+      patch.default_fee_pct = default_fee_pct;
+    }
+
+    if (req.body.subscription_status !== undefined) {
+      const subscription_status = String(req.body.subscription_status || '').trim();
+      if (!['active', 'suspended', 'expired'].includes(subscription_status)) {
+        return res.status(400).json({ error: 'subscription_status invalido' });
+      }
+      patch.subscription_status = subscription_status;
+    }
+
+    if (req.body.subscription_until !== undefined) {
+      const raw = req.body.subscription_until;
+      if (raw === null || String(raw).trim() === '') {
+        patch.subscription_until = null;
+      } else {
+        const s = String(raw).trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+          return res.status(400).json({ error: 'subscription_until invalido (usar YYYY-MM-DD)' });
+        }
+        patch.subscription_until = s;
+      }
+    }
+
+    if (req.body.active !== undefined) {
+      patch.active = !!req.body.active;
+    }
+
+    clientsData.clients[client_id] = {
+      ...current,
+      ...patch
+    };
+
+    saveClients(clientsData);
+
+    res.json({
+      ok: true,
+      client_id,
+      client: clientsData.clients[client_id]
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/panel', requireAdmin, (req, res) => {
   const st4 = stateByDev.bar4 || {};
   const st5 = stateByDev.bar5 || {};
