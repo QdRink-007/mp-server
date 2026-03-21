@@ -616,14 +616,14 @@ async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
   };
 }
 
-function recargarLinkConReintento(dev, intento = 1) {
+function recargarLinkConReintento(dev, priceOverride, titleOverride, intento = 1) {
   const MAX_INTENTOS = 5;
   const esperaMs = 2000 * intento;
 
   generarNuevoLinkParaDev(
     dev,
-    stateByDev[dev]?.lastPrice,
-    stateByDev[dev]?.lastTitle || getDevice(dev)?.title || 'Producto'
+    priceOverride,
+    titleOverride
   ).catch((err) => {
     console.error(
       `❌ Error al regenerar link para ${dev} (intento ${intento}):`,
@@ -632,7 +632,10 @@ function recargarLinkConReintento(dev, intento = 1) {
 
     if (intento < MAX_INTENTOS) {
       console.log(`⏳ Reintentando generar link para ${dev} en ${esperaMs} ms...`);
-      setTimeout(() => recargarLinkConReintento(dev, intento + 1), esperaMs);
+      setTimeout(
+        () => recargarLinkConReintento(dev, priceOverride, titleOverride, intento + 1),
+        esperaMs
+      );
     } else {
       console.log(`⚠️ Se agotaron reintentos para ${dev}. Se mantiene último link.`);
     }
@@ -759,7 +762,7 @@ app.post('/set-item', requireAdmin, (req, res) => {
 
     saveState(stateByDev);
 
-    recargarLinkConReintento(dev);
+    recargarLinkConReintento(dev, price, title);
 
     res.json({ ok: true, dev, price, title });
   } catch (e) {
@@ -979,7 +982,11 @@ app.post('/admin/device/update', requireAdmin, (req, res) => {
     stateByDev[dev].linkActual = null;
 
     saveState(stateByDev);
-    recargarLinkConReintento(dev);
+    recargarLinkConReintento(
+      dev,
+      devicesData.devices[dev].unit_price,
+      devicesData.devices[dev].title
+    );
 
     res.json({
       ok: true,
