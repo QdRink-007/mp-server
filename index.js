@@ -1693,6 +1693,37 @@ app.get('/panel', requireAdmin, (req, res) => {
       </form>
     </div>
 
+    <div class="box">
+      <h3>Registrar equipo virgen</h3>
+      <form onsubmit="return registerDevice(event)">
+        <div style="margin:6px 0;">
+          <label>Client ID:</label><br/>
+          <input name="client_id" style="width:220px;" placeholder="cliente01" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Dev:</label><br/>
+          <input name="dev" style="width:220px;" placeholder="canilla01" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>AP password:</label><br/>
+          <input name="ap_password" style="width:220px;" placeholder="minimo 8 caracteres" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Kind:</label><br/>
+          <select name="kind" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="beer_tap">beer_tap</option>
+            <option value="ticket">ticket</option>
+          </select>
+        </div>
+
+        <button type="submit">Registrar equipo</button>
+        <div class="muted" id="registerDeviceResp" style="margin-top:6px;"></div>
+      </form>
+    </div>
+
     <table>
       <tr>
         <th>Fecha/Hora</th>
@@ -1910,6 +1941,33 @@ app.get('/panel', requireAdmin, (req, res) => {
       return false;
     }
      
+    async function registerDevice(ev) {
+      ev.preventDefault();
+
+      const fd = new FormData(ev.target);
+
+      const body = {
+        client_id: String(fd.get('client_id') || '').trim(),
+        dev: String(fd.get('dev') || '').trim(),
+        ap_password: String(fd.get('ap_password') || '').trim(),
+        kind: String(fd.get('kind') || 'beer_tap').trim()
+      };
+
+      const r = await fetch('/device/register', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+      });
+
+      const j = await r.json();
+      document.getElementById('registerDeviceResp').textContent =
+        j.ok ? ('OK: ' + j.dev + ' registrado') : JSON.stringify(j);
+
+      return false;
+    }
+
     </script>
   </body>
   </html>
