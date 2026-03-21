@@ -876,6 +876,121 @@ app.post('/admin/device/create', requireAdmin, (req, res) => {
   }
 });
 
+app.post('/admin/device/update', requireAdmin, (req, res) => {
+  try {
+    const dev = String(req.body.dev || '').trim().toLowerCase();
+    const current = getDevice(dev);
+
+    if (!current) {
+      return res.status(404).json({ error: 'dev no existe' });
+    }
+
+    const patch = {};
+
+    if (req.body.client_id !== undefined) {
+      const client_id = String(req.body.client_id || '').trim();
+      if (!client_id || client_id.length < 2 || client_id.length > 60) {
+        return res.status(400).json({ error: 'client_id invalido' });
+      }
+      patch.client_id = client_id;
+    }
+
+    if (req.body.title !== undefined) {
+      const title = String(req.body.title || '').trim();
+      if (!title || title.length < 2 || title.length > 60) {
+        return res.status(400).json({ error: 'title invalido' });
+      }
+      patch.title = title;
+    }
+
+    if (req.body.quantity !== undefined) {
+      const quantity = Number(req.body.quantity);
+      if (!Number.isFinite(quantity) || quantity < 1 || quantity > 100) {
+        return res.status(400).json({ error: 'quantity invalido' });
+      }
+      patch.quantity = quantity;
+    }
+
+    if (req.body.currency_id !== undefined) {
+      const currency_id = String(req.body.currency_id || '').trim().toUpperCase();
+      if (!currency_id || currency_id.length !== 3) {
+        return res.status(400).json({ error: 'currency_id invalido' });
+      }
+      patch.currency_id = currency_id;
+    }
+
+    if (req.body.unit_price !== undefined) {
+      const unit_price = Number(req.body.unit_price);
+      if (!Number.isFinite(unit_price) || unit_price < 100 || unit_price > 65000) {
+        return res.status(400).json({ error: 'unit_price invalido' });
+      }
+      patch.unit_price = unit_price;
+    }
+
+    if (req.body.fee_pct !== undefined) {
+      const fee_pct = Number(req.body.fee_pct);
+      if (!Number.isFinite(fee_pct) || fee_pct < 0 || fee_pct > 1) {
+        return res.status(400).json({ error: 'fee_pct invalido' });
+      }
+      patch.fee_pct = fee_pct;
+    }
+
+    if (req.body.token_mode !== undefined) {
+      const token_mode = String(req.body.token_mode || '').trim();
+      if (!['main_account', 'oauth_seller'].includes(token_mode)) {
+        return res.status(400).json({ error: 'token_mode invalido' });
+      }
+      patch.token_mode = token_mode;
+    }
+
+    if (req.body.enabled !== undefined) {
+      patch.enabled = !!req.body.enabled;
+    }
+
+    if (req.body.kind !== undefined) {
+      patch.kind = String(req.body.kind || 'generic').trim();
+    }
+
+    devicesData.devices[dev] = {
+      ...current,
+      ...patch
+    };
+
+    saveDevices(devicesData);
+
+    if (!stateByDev[dev]) {
+      stateByDev[dev] = {
+        paidEvent: null,
+        expectedExtRef: null,
+        ultimaPreferencia: null,
+        linkActual: null,
+        rotateScheduled: false,
+        lastPrice: devicesData.devices[dev].unit_price,
+        lastTitle: devicesData.devices[dev].title,
+      };
+    } else {
+      stateByDev[dev].lastTitle = devicesData.devices[dev].title;
+      stateByDev[dev].lastPrice = devicesData.devices[dev].unit_price;
+    }
+
+    stateByDev[dev].paidEvent = null;
+    stateByDev[dev].expectedExtRef = null;
+    stateByDev[dev].ultimaPreferencia = null;
+    stateByDev[dev].linkActual = null;
+
+    saveState(stateByDev);
+    recargarLinkConReintento(dev);
+
+    res.json({
+      ok: true,
+      dev,
+      device: devicesData.devices[dev]
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/admin/clients', requireAdmin, (req, res) => {
   try {
     const clients = getClients();
