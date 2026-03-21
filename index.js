@@ -299,6 +299,61 @@ function getClient(clientId) {
   return clients[String(clientId || '').trim()] || null;
 }
 
+function isDateExpired(dateStr) {
+  if (!dateStr) return false;
+
+  const s = String(dateStr).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate()).padStart(2, '0');
+  const todayStr = `${yyyy}-${mm}-${dd}`;
+
+  return s < todayStr;
+}
+
+function getDeviceAccessStatus(dev) {
+  const device = getDevice(dev);
+  if (!device) {
+    return { ok: false, code: 'device_not_found', message: 'device inexistente' };
+  }
+
+  if (device.enabled !== true) {
+    return { ok: false, code: 'device_disabled', message: 'device deshabilitado' };
+  }
+
+  const client = getClient(device.client_id);
+  if (!client) {
+    return { ok: false, code: 'client_not_found', message: 'cliente inexistente' };
+  }
+
+  if (client.active !== true) {
+    return { ok: false, code: 'client_inactive', message: 'cliente inactivo' };
+  }
+
+  const subStatus = String(client.subscription_status || '').trim();
+
+  if (subStatus === 'suspended') {
+    return { ok: false, code: 'client_suspended', message: 'cliente suspendido' };
+  }
+
+  if (subStatus === 'expired') {
+    return { ok: false, code: 'client_expired', message: 'cliente expirado' };
+  }
+
+  if (isDateExpired(client.subscription_until)) {
+    return { ok: false, code: 'subscription_until_expired', message: 'suscripción vencida' };
+  }
+
+  return {
+    ok: true,
+    device,
+    client
+  };
+}
+
 function saveClients(clientsData) {
   try {
     fs.writeFileSync(CLIENTS_PATH, JSON.stringify(clientsData, null, 2));
