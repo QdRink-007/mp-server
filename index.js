@@ -648,8 +648,14 @@ app.get('/', (req, res) => {
 app.get('/nuevo-link', async (req, res) => {
   try {
     const dev = (req.query.dev || '').toLowerCase();
-    if (!isDeviceEnabled(dev)) {
-      return res.status(400).json({ error: 'dev invalido' });
+
+    const access = getDeviceAccessStatus(dev);
+    if (!access.ok) {
+      return res.status(403).json({
+        error: access.message,
+        code: access.code,
+        dev
+      });
     }
 
     const force = String(req.query.force || '') === '1';
