@@ -903,6 +903,98 @@ app.post('/admin/device/create', requireAdmin, (req, res) => {
   }
 });
 
+app.post('/device/register', (req, res) => {
+  try {
+    const client_id = String(req.body.client_id || '').trim();
+    const dev = String(req.body.dev || '').trim().toLowerCase();
+    const ap_password = String(req.body.ap_password || '').trim();
+    const kind = String(req.body.kind || 'beer_tap').trim();
+
+    if (!client_id) {
+      return res.status(400).json({ error: 'client_id requerido' });
+    }
+
+    if (!/^[a-z0-9_-]{3,40}$/.test(dev)) {
+      return res.status(400).json({ error: 'dev invalido (3..40, a-z0-9_-)' });
+    }
+
+    if (ap_password.length < 8 || ap_password.length > 63) {
+      return res.status(400).json({ error: 'ap_password invalida (8..63)' });
+    }
+
+    const client = getClient(client_id);
+    if (!client) {
+      return res.status(404).json({ error: 'cliente no existe', code: 'client_not_found' });
+    }
+
+    if (client.active !== true) {
+      return res.status(403).json({ error: 'cliente inactivo', code: 'client_inactive' });
+    }
+
+    const subStatus = String(client.subscription_status || '').trim();
+    if (subStatus === 'suspended') {
+      return res.status(403).json({ error: 'cliente suspendido', code: 'client_suspended' });
+    }
+
+    if (subStatus === 'expired') {
+      return res.status(403).json({ error: 'cliente expirado', code: 'client_expired' });
+    }
+
+    if (isDateExpired(client.subscription_until)) {
+      return res.status(403).json({ error: 'suscripción vencida', code: 'subscription_until_expired' });
+    }
+
+    const devices = getDevices();
+    if (devices[dev]) {
+      return res.status(400).json({ error: 'ese dev ya existe', code: 'dev_already_exists' });
+    }
+
+    const defaultFee = Number(client.default_fee_pct || 0);
+    const inferredTokenMode =
+      client.plan_type === 'marketplace_fee' ? 'oauth_seller' : 'main_account';
+
+    const device_key =
+      'dk_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+
+    devicesData.devices[dev] = {
+      client_id,
+      title: kind === 'ticket' ? 'Qtiket' : 'QdRink',
+      quantity: 1,
+      currency_id: 'ARS',
+      unit_price: 1000,
+      fee_pct: defaultFee,
+      token_mode: inferredTokenMode,
+      enabled: true,
+      kind,
+      device_key
+    };
+
+    saveDevices(devicesData);
+
+    stateByDev[dev] = {
+      paidEvent: null,
+      expectedExtRef: null,
+      ultimaPreferencia: null,
+      linkActual: null,
+      rotateScheduled: false,
+      lastPrice: devicesData.devices[dev].unit_price,
+      lastTitle: devicesData.devices[dev].title,
+    };
+    saveState(stateByDev);
+
+    res.json({
+      ok: true,
+      client_id,
+      dev,
+      device_key,
+      ap_password,
+      kind
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/device/config/update', (req, res) => {
   try {
     const dev = String(req.body.dev || '').trim().toLowerCase();
