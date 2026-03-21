@@ -1264,6 +1264,63 @@ app.get('/panel', requireAdmin, (req, res) => {
       </form>
     </div>
 
+    <div class="box">
+      <h3>Editar cliente</h3>
+      <form onsubmit="return updateClient(event)">
+        <div style="margin:6px 0;">
+          <label>Client ID:</label><br/>
+          <input name="client_id" style="width:220px;" placeholder="cliente02" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Nombre visible:</label><br/>
+          <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Plan:</label><br/>
+          <select name="plan_type" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="">(sin cambio)</option>
+            <option value="direct">direct</option>
+            <option value="marketplace_fee">marketplace_fee</option>
+            <option value="subscription">subscription</option>
+          </select>
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Fee por defecto (ej 0.03):</label><br/>
+          <input name="default_fee_pct" style="width:120px;" placeholder="0.03" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Subscription status:</label><br/>
+          <select name="subscription_status" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="">(sin cambio)</option>
+            <option value="active">active</option>
+            <option value="suspended">suspended</option>
+            <option value="expired">expired</option>
+          </select>
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Subscription until (YYYY-MM-DD):</label><br/>
+          <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Active:</label><br/>
+          <select name="active" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="">(sin cambio)</option>
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
+
+        <button type="submit">Actualizar cliente</button>
+        <div class="muted" id="updateClientResp" style="margin-top:6px;"></div>
+      </form>
+    </div>
+
     <table>
       <tr>
         <th>Fecha/Hora</th>
@@ -1440,6 +1497,46 @@ app.get('/panel', requireAdmin, (req, res) => {
      
        return false;
      }
+
+    async function updateClient(ev) {
+      ev.preventDefault();
+
+      const fd = new FormData(ev.target);
+
+      const body = {
+        client_id: String(fd.get('client_id') || '').trim()
+      };
+
+      const display_name = String(fd.get('display_name') || '').trim();
+      const plan_type = String(fd.get('plan_type') || '').trim();
+      const default_fee_pct_raw = String(fd.get('default_fee_pct') || '').trim();
+      const subscription_status = String(fd.get('subscription_status') || '').trim();
+      const subscription_until_raw = String(fd.get('subscription_until') || '').trim();
+      const active_raw = String(fd.get('active') || '').trim();
+
+      if (display_name) body.display_name = display_name;
+      if (plan_type) body.plan_type = plan_type;
+      if (default_fee_pct_raw) body.default_fee_pct = Number(default_fee_pct_raw);
+      if (subscription_status) body.subscription_status = subscription_status;
+      if (subscription_until_raw) body.subscription_until = subscription_until_raw;
+      if (active_raw === 'true') body.active = true;
+      if (active_raw === 'false') body.active = false;
+
+      const r = await fetch('/admin/client/update', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-key': ADMIN_KEY
+        },
+        body: JSON.stringify(body)
+      });
+
+      const j = await r.json();
+      document.getElementById('updateClientResp').textContent =
+        j.ok ? ('OK: ' + j.client_id + ' actualizado') : JSON.stringify(j);
+
+      return false;
+    }
      
     </script>
   </body>
