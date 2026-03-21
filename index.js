@@ -842,6 +842,10 @@ app.post('/admin/device/create', requireAdmin, (req, res) => {
       return res.status(400).json({ error: 'ese dev ya existe' });
     }
 
+    const device_key =
+      String(req.body.device_key || '').trim() ||
+      ('dk_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36));
+
     devicesData.devices[dev] = {
       client_id,
       title,
@@ -851,7 +855,8 @@ app.post('/admin/device/create', requireAdmin, (req, res) => {
       fee_pct,
       token_mode,
       enabled,
-      kind
+      kind,
+      device_key
     };
 
     saveDevices(devicesData);
@@ -873,6 +878,71 @@ app.post('/admin/device/create', requireAdmin, (req, res) => {
       ok: true,
       dev,
       device: devicesData.devices[dev]
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/device/config/update', (req, res) => {
+  try {
+    const dev = String(req.body.dev || '').trim().toLowerCase();
+    const device_key = String(req.body.device_key || '').trim();
+    const title = String(req.body.title || '').trim();
+    const unit_price = Number(req.body.unit_price);
+
+    if (!dev) {
+      return res.status(400).json({ error: 'dev requerido' });
+    }
+
+    const device = getDevice(dev);
+    if (!device) {
+      return res.status(404).json({ error: 'device no existe' });
+    }
+
+    if (!device.device_key || device_key !== String(device.device_key)) {
+      return res.status(401).json({ error: 'device_key invalida' });
+    }
+
+    if (title.length < 2 || title.length > 60) {
+      return res.status(400).json({ error: 'title invalido' });
+    }
+
+    if (!Number.isFinite(unit_price) || unit_price < 100 || unit_price > 65000) {
+      return res.status(400).json({ error: 'unit_price invalido' });
+    }
+
+    devicesData.devices[dev].title = title;
+    devicesData.devices[dev].unit_price = unit_price;
+    saveDevices(devicesData);
+
+    if (!stateByDev[dev]) {
+      stateByDev[dev] = {
+        paidEvent: null,
+        expectedExtRef: null,
+        ultimaPreferencia: null,
+        linkActual: null,
+        rotateScheduled: false,
+        lastPrice: unit_price,
+        lastTitle: title,
+      };
+    } else {
+      stateByDev[dev].lastTitle = title;
+      stateByDev[dev].lastPrice = unit_price;
+      stateByDev[dev].paidEvent = null;
+      stateByDev[dev].expectedExtRef = null;
+      stateByDev[dev].ultimaPreferencia = null;
+      stateByDev[dev].linkActual = null;
+    }
+
+    saveState(stateByDev);
+    recargarLinkConReintento(dev, unit_price, title);
+
+    res.json({
+      ok: true,
+      dev,
+      title,
+      unit_price
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -952,6 +1022,14 @@ app.post('/admin/device/update', requireAdmin, (req, res) => {
 
     if (req.body.kind !== undefined) {
       patch.kind = String(req.body.kind || 'generic').trim();
+    }
+
+    if (req.body.device_key !== undefined) {
+      const device_key = String(req.body.device_key || '').trim();
+      if (!device_key || device_key.length < 8 || device_key.length > 120) {
+        return res.status(400).json({ error: 'device_key invalida' });
+      }
+      patch.device_key = device_key;
     }
 
     devicesData.devices[dev] = {
