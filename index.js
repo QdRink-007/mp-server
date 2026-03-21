@@ -200,6 +200,8 @@ let tokensByDev = loadTokens();
 let devicesData = loadDevices();
 let clientsData = loadClients();
 
+ensureDeviceKeys();
+
 console.log('🔑 tokens.json existe?', fs.existsSync(TOKENS_PATH));
 console.log('🔑 tokens cargados:', Object.keys(tokensByDev));
 console.log('🧩 devices.json existe?', fs.existsSync(DEVICES_PATH));
@@ -237,6 +239,23 @@ function getDeviceItem(dev) {
     currency_id: String(d.currency_id || 'ARS'),
     unit_price: Number(d.unit_price || 100),
   };
+}
+
+function ensureDeviceKeys() {
+  let changed = false;
+
+  for (const [dev, cfg] of Object.entries(getDevices())) {
+    if (!cfg.device_key || String(cfg.device_key).trim().length < 8) {
+      cfg.device_key =
+        'dk_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+      changed = true;
+      console.log(`🔐 device_key generada para ${dev}`);
+    }
+  }
+
+  if (changed) {
+    saveDevices(devicesData);
+  }
 }
 
 function loadClients() {
