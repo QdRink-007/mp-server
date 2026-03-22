@@ -25,8 +25,8 @@ const ACCESS_TOKEN =
   process.env.MP_ACCESS_TOKEN ||
   'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // tu token (marketplace) para bar1 o fallback
 
-const MP_CLIENT_ID = process.env.MP_CLIENT_ID || '5741144054953865';
-const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || 'ET5bOFcRSRzgdDQU7G8qT7UydoELzA3b';
+const MP_CLIENT_ID = process.env.MP_CLIENT_ID || '6603583526397159';
+const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || 'dRhqUDhkCgga5869pGjhKeNUVtuJD8cI';
 const MP_REDIRECT_URI =
   process.env.MP_REDIRECT_URI || 'https://mp-server-c1mg.onrender.com/oauth/callback';
 
