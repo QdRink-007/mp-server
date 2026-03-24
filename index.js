@@ -132,30 +132,7 @@ function pruneStateByDevices(stateObj) {
 
 function loadDevices() {
   const seed = {
-    devices: {
-      bar1: {
-        client_id: 'mariano',
-        title: 'Quilmes',
-        quantity: 1,
-        currency_id: 'ARS',
-        unit_price: 3000,
-        fee_pct: 0,
-        token_mode: 'main_account',
-        enabled: true,
-        kind: 'beer_tap'
-      },
-      bar4: {
-        client_id: 'socio1',
-        title: 'Qtiket',
-        quantity: 1,
-        currency_id: 'ARS',
-        unit_price: 4500,
-        fee_pct: 0.03,
-        token_mode: 'oauth_seller',
-        enabled: true,
-        kind: 'ticket'
-      }
-    }
+    devices: {}
   };
 
   try {
@@ -260,24 +237,7 @@ function ensureDeviceKeys() {
 
 function loadClients() {
   const seed = {
-    clients: {
-      mariano: {
-        display_name: 'Mariano',
-        plan_type: 'direct',
-        default_fee_pct: 0,
-        subscription_status: 'active',
-        subscription_until: null,
-        active: true
-      },
-      cliente01: {
-        display_name: 'Cliente 01',
-        plan_type: 'subscription',
-        default_fee_pct: 0.03,
-        subscription_status: 'active',
-        subscription_until: null,
-        active: true
-      }
-    }
+    clients: {}
   };
 
   try {
@@ -1187,6 +1147,39 @@ app.post('/admin/device/update', requireAdmin, (req, res) => {
   }
 });
 
+
+app.post('/admin/device/delete', requireAdmin, (req, res) => {
+  try {
+    const dev = String(req.body.dev || '').trim().toLowerCase();
+
+    if (!dev) {
+      return res.status(400).json({ error: 'dev requerido' });
+    }
+
+    const current = getDevice(dev);
+    if (!current) {
+      return res.status(404).json({ error: 'dev no existe' });
+    }
+
+    delete devicesData.devices[dev];
+    saveDevices(devicesData);
+
+    if (stateByDev[dev]) {
+      delete stateByDev[dev];
+      saveState(stateByDev);
+    }
+
+    if (tokensByDev[dev]) {
+      delete tokensByDev[dev];
+      saveTokens(tokensByDev);
+    }
+
+    res.json({ ok: true, dev });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/admin/clients', requireAdmin, (req, res) => {
   try {
     const clients = getClients();
@@ -1364,11 +1357,110 @@ app.post('/admin/client/update', requireAdmin, (req, res) => {
   }
 });
 
+
+app.post('/admin/client/delete', requireAdmin, (req, res) => {
+  try {
+    const client_id = String(req.body.client_id || '').trim();
+
+    if (!client_id) {
+      return res.status(400).json({ error: 'client_id requerido' });
+    }
+
+    const current = getClient(client_id);
+    if (!current) {
+      return res.status(404).json({ error: 'client_id no existe' });
+    }
+
+    const linkedDevices = Object.entries(getDevices())
+      .filter(([, d]) => d?.client_id === client_id)
+      .map(([dev]) => dev);
+
+    if (linkedDevices.length > 0) {
+      return res.status(400).json({
+        error: 'no se puede eliminar el cliente porque tiene devices asociados',
+        code: 'client_has_devices',
+        devices: linkedDevices
+      });
+    }
+
+    delete clientsData.clients[client_id];
+    saveClients(clientsData);
+
+    res.json({ ok: true, client_id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 app.get('/panel', requireAdmin, (req, res) => {
-  const st4 = stateByDev.bar4 || {};
-  const st5 = stateByDev.bar5 || {};
-  const d4 = getDevice('bar4');
-  const d5 = getDevice('bar5');
+  const devicesEntries = Object.entries(getDevices()).sort((a, b) => a[0].localeCompare(b[0]));
+  const clientsEntries = Object.entries(getClients()).sort((a, b) => a[0].localeCompare(b[0]));
+
+  const deviceConfigBoxes = devicesEntries.map(([dev, d]) => {
+    const st = stateByDev[dev] || {};
+    return `
+    <div class="box">
+      <h3>Config ${escapeHtml(String(d.title || dev))} (${escapeHtml(dev)})</h3>
+      <form method="post" action="/set-item" data-out="setResp_${escapeHtml(dev)}" onsubmit="return sendForm(event)">
+        <input type="hidden" name="dev" value="${escapeHtml(dev)}" />
+
+        <div style="margin:6px 0;">
+          <label>Título:</label><br/>
+          <input name="title" style="width:320px;" value="${escapeHtml(String(st.lastTitle || d.title || 'Producto'))}" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Precio:</label><br/>
+          <input name="price" style="width:120px;" value="${escapeHtml(String(st.lastPrice || d.unit_price || 100))}" />
+        </div>
+
+        <button type="submit">Guardar y regenerar QR</button>
+        <div class="muted" id="setResp_${escapeHtml(dev)}" style="margin-top:6px;"></div>
+      </form>
+    </div>
+    `;
+  }).join('');
+
+  const devicesTableRows = devicesEntries.map(([dev, d]) => {
+    const oauthConnected = !!tokensByDev[dev]?.access_token;
+    const st = stateByDev[dev] || {};
+    return `
+      <tr>
+        <td>${escapeHtml(dev)}</td>
+        <td>${escapeHtml(String(d.client_id || ''))}</td>
+        <td>${escapeHtml(String(d.title || ''))}</td>
+        <td>${escapeHtml(String(d.unit_price || ''))}</td>
+        <td>${escapeHtml(String(st.lastPrice || d.unit_price || ''))}</td>
+        <td>${escapeHtml(String(d.fee_pct || 0))}</td>
+        <td>${escapeHtml(String(d.token_mode || ''))}</td>
+        <td>${escapeHtml(String(d.enabled))}</td>
+        <td>${escapeHtml(String(d.kind || ''))}</td>
+        <td>${oauthConnected ? 'sí' : 'no'}</td>
+        <td><button type="button" onclick="deleteDevice('${escapeHtml(dev)}')">Eliminar</button></td>
+      </tr>
+    `;
+  }).join('');
+
+  const clientsTableRows = clientsEntries.map(([client_id, cfg]) => {
+    const linkedDevices = devicesEntries
+      .filter(([, d]) => d?.client_id === client_id)
+      .map(([dev]) => dev);
+
+    return `
+      <tr>
+        <td>${escapeHtml(client_id)}</td>
+        <td>${escapeHtml(String(cfg.display_name || ''))}</td>
+        <td>${escapeHtml(String(cfg.plan_type || ''))}</td>
+        <td>${escapeHtml(String(cfg.default_fee_pct || 0))}</td>
+        <td>${escapeHtml(String(cfg.subscription_status || ''))}</td>
+        <td>${escapeHtml(String(cfg.subscription_until || ''))}</td>
+        <td>${escapeHtml(String(cfg.active))}</td>
+        <td>${escapeHtml(linkedDevices.join(', '))}</td>
+        <td><button type="button" onclick="deleteClient('${escapeHtml(client_id)}')">Eliminar</button></td>
+      </tr>
+    `;
+  }).join('');
 
   let html = `
   <html>
@@ -1379,322 +1471,262 @@ app.get('/panel', requireAdmin, (req, res) => {
       body { font-family: sans-serif; background:#111; color:#eee; padding: 10px; }
       a { color: #9ad; }
       table { border-collapse: collapse; width: 100%; margin-top: 10px; }
-      th, td { border: 1px solid #444; padding: 6px 8px; font-size: 13px; }
+      th, td { border: 1px solid #444; padding: 6px 8px; font-size: 13px; vertical-align: top; }
       th { background: #222; }
       tr:nth-child(even) { background:#1b1b1b; }
       .muted { color:#aaa; font-size: 12px; }
       .box { background:#181818; border:1px solid #333; padding:10px; border-radius: 6px; margin-top:10px; }
-      input { padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee; }
+      input, select { padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee; }
       button { padding:8px 12px; border:none; border-radius:4px; background:#2d6cdf; color:white; cursor:pointer; }
       button:hover { opacity:0.9; }
+      .danger { background:#a33; }
+      .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap:10px; }
+      .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#222; border:1px solid #444; margin-right:6px; }
     </style>
   </head>
   <body>
     <h1>Panel QdRink</h1>
 
-    ${d4 ? `
     <div class="box">
-      <h3>Config ${escapeHtml(d4.title || 'bar4')} (bar4)</h3>
-      <form method="post" action="/set-item" onsubmit="return sendForm(event)">
-        <input type="hidden" name="dev" value="bar4" />
-
-        <div style="margin:6px 0;">
-          <label>Título:</label><br/>
-          <input name="title" style="width:320px;" value="${escapeHtml(st4.lastTitle || d4.title || 'Producto')}" />
-        </div>
-
-        <div style="margin:6px 0;">
-          <label>Precio:</label><br/>
-          <input name="price" style="width:120px;" value="${escapeHtml(String(st4.lastPrice || d4.unit_price || 100))}" />
-        </div>
-
-        <button type="submit">Guardar y regenerar QR</button>
-        <div class="muted" id="resp" style="margin-top:6px;"></div>
-      </form>
+      <div class="muted">Resumen</div>
+      <div style="margin-top:6px;">
+        <span class="pill">Clients: ${clientsEntries.length}</span>
+        <span class="pill">Devices: ${devicesEntries.length}</span>
+        <span class="pill">Devices habilitados: ${getAllowedDevs().length}</span>
+      </div>
+      <div class="muted" style="margin-top:8px;">Ahora el panel ya no depende de bar4/bar5. Todo sale de clients.json y devices.json.</div>
     </div>
-    ` : ''}
 
-    ${d5 ? `
-    <div class="box">
-      <h3>Config ${escapeHtml(d5.title || 'bar5')} (bar5)</h3>
-      <form method="post" action="/set-item" onsubmit="return sendForm(event)">
-        <input type="hidden" name="dev" value="bar5" />
-
-        <div style="margin:6px 0;">
-          <label>Título:</label><br/>
-          <input name="title" style="width:320px;" value="${escapeHtml(st5.lastTitle || d5.title || 'Producto')}" />
-        </div>
-
-        <div style="margin:6px 0;">
-          <label>Precio:</label><br/>
-          <input name="price" style="width:120px;" value="${escapeHtml(String(st5.lastPrice || d5.unit_price || 100))}" />
-        </div>
-
-        <button type="submit">Guardar y regenerar QR</button>
-        <div class="muted" id="resp5" style="margin-top:6px;"></div>
-      </form>
-    </div>
-    ` : ''}
+    ${deviceConfigBoxes || '<div class="box"><div class="muted">No hay devices cargados todavía.</div></div>'}
 
     <div class="box">
       <div class="muted">Conectar vendedor (devices OAuth habilitados):</div>
       <ul>
-        ${getAllowedDevs()
-          .filter(dev => getDevice(dev)?.token_mode === 'oauth_seller')
-          .map(dev => `<li><a href="/connect?dev=${encodeURIComponent(dev)}">/connect?dev=${escapeHtml(dev)}</a></li>`)
-          .join('')}
+        ${devicesEntries
+          .filter(([, d]) => d?.enabled === true && d?.token_mode === 'oauth_seller')
+          .map(([dev]) => `<li><a href="/connect?dev=${encodeURIComponent(dev)}&key=${encodeURIComponent(ADMIN_KEY)}">/connect?dev=${escapeHtml(dev)}</a></li>`)
+          .join('') || '<li class="muted">No hay devices oauth_seller habilitados.</li>'}
       </ul>
     </div>
 
-    <div class="box">
-      <h3>Crear device</h3>
-      <form onsubmit="return createDevice(event)">
-        <div style="margin:6px 0;">
-          <label>Dev:</label><br/>
-          <input name="dev" style="width:220px;" placeholder="bar6" />
-        </div>
+    <div class="grid">
+      <div class="box">
+        <h3>Crear cliente</h3>
+        <form onsubmit="return createClient(event)">
+          <div style="margin:6px 0;">
+            <label>Client ID:</label><br/>
+            <input name="client_id" style="width:220px;" placeholder="cliente02" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Cliente ID:</label><br/>
-          <input name="client_id" style="width:220px;" placeholder="cliente01" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Nombre visible:</label><br/>
+            <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Título:</label><br/>
-          <input name="title" style="width:320px;" placeholder="Andes IPA" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Plan:</label><br/>
+            <select name="plan_type" style="width:220px;">
+              <option value="direct">direct</option>
+              <option value="marketplace_fee">marketplace_fee</option>
+              <option value="subscription">subscription</option>
+            </select>
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Precio:</label><br/>
-          <input name="unit_price" style="width:120px;" placeholder="3800" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Fee por defecto (ej 0.03):</label><br/>
+            <input name="default_fee_pct" style="width:120px;" value="0" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Fee % (ej 0.03):</label><br/>
-          <input name="fee_pct" style="width:120px;" value="0" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Subscription status:</label><br/>
+            <select name="subscription_status" style="width:220px;">
+              <option value="active">active</option>
+              <option value="suspended">suspended</option>
+              <option value="expired">expired</option>
+            </select>
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Token mode:</label><br/>
-          <select name="token_mode" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
-            <option value="main_account">main_account</option>
-            <option value="oauth_seller">oauth_seller</option>
-          </select>
-        </div>
+          <div style="margin:6px 0;">
+            <label>Subscription until (YYYY-MM-DD):</label><br/>
+            <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Kind:</label><br/>
-          <input name="kind" style="width:220px;" value="beer_tap" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Active:</label><br/>
+            <select name="active" style="width:220px;">
+              <option value="true">true</option>
+              <option value="false">false</option>
+            </select>
+          </div>
 
-        <button type="submit">Crear device</button>
-        <div class="muted" id="createResp" style="margin-top:6px;"></div>
-      </form>
-    </div>
+          <button type="submit">Crear cliente</button>
+          <div class="muted" id="createClientResp" style="margin-top:6px;"></div>
+        </form>
+      </div>
 
-    <div class="box">
-      <h3>Editar device</h3>
-      <form onsubmit="return updateDevice(event)">
-        <div style="margin:6px 0;">
-          <label>Dev:</label><br/>
-          <input name="dev" style="width:220px;" placeholder="bar6" />
-        </div>
+      <div class="box">
+        <h3>Editar cliente</h3>
+        <form onsubmit="return updateClient(event)">
+          <div style="margin:6px 0;">
+            <label>Client ID:</label><br/>
+            <input name="client_id" style="width:220px;" placeholder="cliente02" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Cliente ID:</label><br/>
-          <input name="client_id" style="width:220px;" placeholder="cliente01" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Nombre visible:</label><br/>
+            <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Título:</label><br/>
-          <input name="title" style="width:320px;" placeholder="Andes IPA" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Plan:</label><br/>
+            <select name="plan_type" style="width:220px;">
+              <option value="">(sin cambio)</option>
+              <option value="direct">direct</option>
+              <option value="marketplace_fee">marketplace_fee</option>
+              <option value="subscription">subscription</option>
+            </select>
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Precio:</label><br/>
-          <input name="unit_price" style="width:120px;" placeholder="3800" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Fee por defecto (ej 0.03):</label><br/>
+            <input name="default_fee_pct" style="width:120px;" placeholder="0.03" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Fee % (ej 0.03):</label><br/>
-          <input name="fee_pct" style="width:120px;" placeholder="0" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Subscription status:</label><br/>
+            <select name="subscription_status" style="width:220px;">
+              <option value="">(sin cambio)</option>
+              <option value="active">active</option>
+              <option value="suspended">suspended</option>
+              <option value="expired">expired</option>
+            </select>
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Token mode:</label><br/>
-          <select name="token_mode" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
-            <option value="">(sin cambio)</option>
-            <option value="main_account">main_account</option>
-            <option value="oauth_seller">oauth_seller</option>
-          </select>
-        </div>
+          <div style="margin:6px 0;">
+            <label>Subscription until (YYYY-MM-DD):</label><br/>
+            <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Kind:</label><br/>
-          <input name="kind" style="width:220px;" placeholder="beer_tap" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Active:</label><br/>
+            <select name="active" style="width:220px;">
+              <option value="">(sin cambio)</option>
+              <option value="true">true</option>
+              <option value="false">false</option>
+            </select>
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Enabled:</label><br/>
-          <select name="enabled" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
-            <option value="">(sin cambio)</option>
-            <option value="true">true</option>
-            <option value="false">false</option>
-          </select>
-        </div>
+          <button type="submit">Actualizar cliente</button>
+          <div class="muted" id="updateClientResp" style="margin-top:6px;"></div>
+        </form>
+      </div>
 
-        <button type="submit">Actualizar device</button>
-        <div class="muted" id="updateResp" style="margin-top:6px;"></div>
-      </form>
-    </div>
+      <div class="box">
+        <h3>Crear device</h3>
+        <form onsubmit="return createDevice(event)">
+          <div style="margin:6px 0;">
+            <label>Dev:</label><br/>
+            <input name="dev" style="width:220px;" placeholder="canilla01" />
+          </div>
 
-    <div class="box">
-      <h3>Devices actuales</h3>
-      <table>
-        <tr>
-          <th>Dev</th>
-          <th>Cliente</th>
-          <th>Título</th>
-          <th>Precio</th>
-          <th>Fee</th>
-          <th>Token</th>
-          <th>Enabled</th>
-          <th>Kind</th>
-          <th>OAuth</th>
-        </tr>
-        ${getAllowedDevs().map(dev => {
-          const d = getDevice(dev) || {};
-          const oauthConnected = !!tokensByDev[dev]?.access_token;
-          return `
-            <tr>
-              <td>${escapeHtml(dev)}</td>
-              <td>${escapeHtml(String(d.client_id || ''))}</td>
-              <td>${escapeHtml(String(d.title || ''))}</td>
-              <td>${escapeHtml(String(d.unit_price || ''))}</td>
-              <td>${escapeHtml(String(d.fee_pct || 0))}</td>
-              <td>${escapeHtml(String(d.token_mode || ''))}</td>
-              <td>${escapeHtml(String(d.enabled))}</td>
-              <td>${escapeHtml(String(d.kind || ''))}</td>
-              <td>${oauthConnected ? 'sí' : 'no'}</td>
-            </tr>
-          `;
-        }).join('')}
-      </table>
-    </div>
+          <div style="margin:6px 0;">
+            <label>Cliente ID:</label><br/>
+            <input name="client_id" style="width:220px;" placeholder="cliente01" />
+          </div>
 
-    <div class="box">
-      <h3>Crear cliente</h3>
-      <form onsubmit="return createClient(event)">
-        <div style="margin:6px 0;">
-          <label>Client ID:</label><br/>
-          <input name="client_id" style="width:220px;" placeholder="cliente02" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Título:</label><br/>
+            <input name="title" style="width:320px;" placeholder="QdRink" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Nombre visible:</label><br/>
-          <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Precio:</label><br/>
+            <input name="unit_price" style="width:120px;" placeholder="3800" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Plan:</label><br/>
-          <select name="plan_type" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
-            <option value="direct">direct</option>
-            <option value="marketplace_fee">marketplace_fee</option>
-            <option value="subscription">subscription</option>
-          </select>
-        </div>
+          <div style="margin:6px 0;">
+            <label>Fee % (ej 0.03):</label><br/>
+            <input name="fee_pct" style="width:120px;" value="0" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Fee por defecto (ej 0.03):</label><br/>
-          <input name="default_fee_pct" style="width:120px;" value="0" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Token mode:</label><br/>
+            <select name="token_mode" style="width:220px;">
+              <option value="main_account">main_account</option>
+              <option value="oauth_seller">oauth_seller</option>
+            </select>
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Subscription status:</label><br/>
-          <select name="subscription_status" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
-            <option value="active">active</option>
-            <option value="suspended">suspended</option>
-            <option value="expired">expired</option>
-          </select>
-        </div>
+          <div style="margin:6px 0;">
+            <label>Kind:</label><br/>
+            <input name="kind" style="width:220px;" value="beer_tap" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Subscription until (YYYY-MM-DD):</label><br/>
-          <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
-        </div>
+          <button type="submit">Crear device</button>
+          <div class="muted" id="createResp" style="margin-top:6px;"></div>
+        </form>
+      </div>
 
-        <div style="margin:6px 0;">
-          <label>Active:</label><br/>
-          <select name="active" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
-            <option value="true">true</option>
-            <option value="false">false</option>
-          </select>
-        </div>
+      <div class="box">
+        <h3>Editar device</h3>
+        <form onsubmit="return updateDevice(event)">
+          <div style="margin:6px 0;">
+            <label>Dev:</label><br/>
+            <input name="dev" style="width:220px;" placeholder="canilla01" />
+          </div>
 
-        <button type="submit">Crear cliente</button>
-        <div class="muted" id="createClientResp" style="margin-top:6px;"></div>
-      </form>
-    </div>
+          <div style="margin:6px 0;">
+            <label>Cliente ID:</label><br/>
+            <input name="client_id" style="width:220px;" placeholder="cliente01" />
+          </div>
 
-    <div class="box">
-      <h3>Editar cliente</h3>
-      <form onsubmit="return updateClient(event)">
-        <div style="margin:6px 0;">
-          <label>Client ID:</label><br/>
-          <input name="client_id" style="width:220px;" placeholder="cliente02" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Título:</label><br/>
+            <input name="title" style="width:320px;" placeholder="QdRink" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Nombre visible:</label><br/>
-          <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Precio:</label><br/>
+            <input name="unit_price" style="width:120px;" placeholder="3800" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Plan:</label><br/>
-          <select name="plan_type" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
-            <option value="">(sin cambio)</option>
-            <option value="direct">direct</option>
-            <option value="marketplace_fee">marketplace_fee</option>
-            <option value="subscription">subscription</option>
-          </select>
-        </div>
+          <div style="margin:6px 0;">
+            <label>Fee % (ej 0.03):</label><br/>
+            <input name="fee_pct" style="width:120px;" placeholder="0" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Fee por defecto (ej 0.03):</label><br/>
-          <input name="default_fee_pct" style="width:120px;" placeholder="0.03" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Token mode:</label><br/>
+            <select name="token_mode" style="width:220px;">
+              <option value="">(sin cambio)</option>
+              <option value="main_account">main_account</option>
+              <option value="oauth_seller">oauth_seller</option>
+            </select>
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Subscription status:</label><br/>
-          <select name="subscription_status" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
-            <option value="">(sin cambio)</option>
-            <option value="active">active</option>
-            <option value="suspended">suspended</option>
-            <option value="expired">expired</option>
-          </select>
-        </div>
+          <div style="margin:6px 0;">
+            <label>Kind:</label><br/>
+            <input name="kind" style="width:220px;" placeholder="beer_tap" />
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Subscription until (YYYY-MM-DD):</label><br/>
-          <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
-        </div>
+          <div style="margin:6px 0;">
+            <label>Enabled:</label><br/>
+            <select name="enabled" style="width:220px;">
+              <option value="">(sin cambio)</option>
+              <option value="true">true</option>
+              <option value="false">false</option>
+            </select>
+          </div>
 
-        <div style="margin:6px 0;">
-          <label>Active:</label><br/>
-          <select name="active" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
-            <option value="">(sin cambio)</option>
-            <option value="true">true</option>
-            <option value="false">false</option>
-          </select>
-        </div>
-
-        <button type="submit">Actualizar cliente</button>
-        <div class="muted" id="updateClientResp" style="margin-top:6px;"></div>
-      </form>
+          <button type="submit">Actualizar device</button>
+          <div class="muted" id="updateResp" style="margin-top:6px;"></div>
+        </form>
+      </div>
     </div>
 
     <div class="box">
       <h3>Registrar equipo virgen</h3>
+      <div class="muted">Este es el mismo flujo del ESP nuevo/reset: entra a QdRink_Setup_XXXXX, el usuario pone su client_id, el nombre del device y la clave del AP local.</div>
       <form onsubmit="return registerDevice(event)">
         <div style="margin:6px 0;">
           <label>Client ID:</label><br/>
@@ -1713,7 +1745,7 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         <div style="margin:6px 0;">
           <label>Kind:</label><br/>
-          <select name="kind" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+          <select name="kind" style="width:220px;">
             <option value="beer_tap">beer_tap</option>
             <option value="ticket">ticket</option>
           </select>
@@ -1722,6 +1754,46 @@ app.get('/panel', requireAdmin, (req, res) => {
         <button type="submit">Registrar equipo</button>
         <div class="muted" id="registerDeviceResp" style="margin-top:6px;"></div>
       </form>
+    </div>
+
+    <div class="box">
+      <h3>Clients actuales</h3>
+      <table>
+        <tr>
+          <th>Client ID</th>
+          <th>Nombre</th>
+          <th>Plan</th>
+          <th>Fee default</th>
+          <th>Status</th>
+          <th>Hasta</th>
+          <th>Activo</th>
+          <th>Devices</th>
+          <th>Acción</th>
+        </tr>
+        ${clientsTableRows || '<tr><td colspan="9" class="muted">No hay clients cargados.</td></tr>'}
+      </table>
+      <div class="muted" id="deleteClientResp" style="margin-top:6px;"></div>
+    </div>
+
+    <div class="box">
+      <h3>Devices actuales</h3>
+      <table>
+        <tr>
+          <th>Dev</th>
+          <th>Cliente</th>
+          <th>Título</th>
+          <th>Precio base</th>
+          <th>Último precio</th>
+          <th>Fee</th>
+          <th>Token</th>
+          <th>Enabled</th>
+          <th>Kind</th>
+          <th>OAuth</th>
+          <th>Acción</th>
+        </tr>
+        ${devicesTableRows || '<tr><td colspan="11" class="muted">No hay devices cargados.</td></tr>'}
+      </table>
+      <div class="muted" id="deleteDeviceResp" style="margin-top:6px;"></div>
     </div>
 
     <table>
@@ -1765,12 +1837,13 @@ app.get('/panel', requireAdmin, (req, res) => {
       async function sendForm(ev) {
         ev.preventDefault();
 
-        const fd = new FormData(ev.target);
-        const dev = fd.get('dev');
+        const form = ev.target;
+        const fd = new FormData(form);
+        const outId = form.getAttribute('data-out');
 
         const body = {
-          dev,
-          title: fd.get('title'),
+          dev: String(fd.get('dev') || '').trim(),
+          title: String(fd.get('title') || '').trim(),
           price: Number(fd.get('price'))
         };
 
@@ -1784,9 +1857,7 @@ app.get('/panel', requireAdmin, (req, res) => {
         });
 
         const j = await r.json();
-
-        const outId = (dev === 'bar5') ? 'resp5' : 'resp';
-        document.getElementById(outId).textContent = JSON.stringify(j);
+        if (outId) document.getElementById(outId).textContent = JSON.stringify(j);
 
         return false;
       }
@@ -1820,7 +1891,7 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         const j = await r.json();
         document.getElementById('createResp').textContent =
-          j.ok ? ('OK: ' + j.dev + ' creado') : JSON.stringify(j);
+          j.ok ? ('OK: ' + j.dev + ' creado. Recargá el panel.') : JSON.stringify(j);
 
         return false;
       }
@@ -1862,112 +1933,148 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         const j = await r.json();
         document.getElementById('updateResp').textContent =
-          j.ok ? ('OK: ' + j.dev + ' actualizado') : JSON.stringify(j);
+          j.ok ? ('OK: ' + j.dev + ' actualizado. Recargá el panel.') : JSON.stringify(j);
 
         return false;
       }
 
-     async function createClient(ev) {
-       ev.preventDefault();
+      async function deleteDevice(dev) {
+        if (!confirm('Eliminar device ' + dev + '?')) return false;
 
-       const fd = new FormData(ev.target);
+        const r = await fetch('/admin/device/delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-key': ADMIN_KEY
+          },
+          body: JSON.stringify({ dev })
+        });
 
-       const subscriptionUntil = String(fd.get('subscription_until') || '').trim();
-       const activeRaw = String(fd.get('active') || 'true').trim();
-     
-       const body = {
-         client_id: String(fd.get('client_id') || '').trim(),
-         display_name: String(fd.get('display_name') || '').trim(),
-         plan_type: String(fd.get('plan_type') || '').trim(),
-         default_fee_pct: Number(fd.get('default_fee_pct') || 0),
-         subscription_status: String(fd.get('subscription_status') || '').trim(),
-         subscription_until: subscriptionUntil || null,
-         active: activeRaw === 'true'
-       };
+        const j = await r.json();
+        document.getElementById('deleteDeviceResp').textContent =
+          j.ok ? ('OK: ' + j.dev + ' eliminado. Recargá el panel.') : JSON.stringify(j);
 
-       const r = await fetch('/admin/client/create', {
-         method: 'POST',
-         headers: {
-           'Content-Type': 'application/json',
-           'x-admin-key': ADMIN_KEY
-         },
-         body: JSON.stringify(body)
-       });
+        return false;
+      }
 
-       const j = await r.json();
-       document.getElementById('createClientResp').textContent =
-         j.ok ? ('OK: ' + j.client_id + ' creado') : JSON.stringify(j);
-     
-       return false;
-     }
+      async function createClient(ev) {
+        ev.preventDefault();
 
-    async function updateClient(ev) {
-      ev.preventDefault();
+        const fd = new FormData(ev.target);
+        const subscriptionUntil = String(fd.get('subscription_until') || '').trim();
+        const activeRaw = String(fd.get('active') || 'true').trim();
 
-      const fd = new FormData(ev.target);
+        const body = {
+          client_id: String(fd.get('client_id') || '').trim(),
+          display_name: String(fd.get('display_name') || '').trim(),
+          plan_type: String(fd.get('plan_type') || '').trim(),
+          default_fee_pct: Number(fd.get('default_fee_pct') || 0),
+          subscription_status: String(fd.get('subscription_status') || '').trim(),
+          subscription_until: subscriptionUntil || null,
+          active: activeRaw === 'true'
+        };
 
-      const body = {
-        client_id: String(fd.get('client_id') || '').trim()
-      };
+        const r = await fetch('/admin/client/create', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-key': ADMIN_KEY
+          },
+          body: JSON.stringify(body)
+        });
 
-      const display_name = String(fd.get('display_name') || '').trim();
-      const plan_type = String(fd.get('plan_type') || '').trim();
-      const default_fee_pct_raw = String(fd.get('default_fee_pct') || '').trim();
-      const subscription_status = String(fd.get('subscription_status') || '').trim();
-      const subscription_until_raw = String(fd.get('subscription_until') || '').trim();
-      const active_raw = String(fd.get('active') || '').trim();
+        const j = await r.json();
+        document.getElementById('createClientResp').textContent =
+          j.ok ? ('OK: ' + j.client_id + ' creado. Recargá el panel.') : JSON.stringify(j);
 
-      if (display_name) body.display_name = display_name;
-      if (plan_type) body.plan_type = plan_type;
-      if (default_fee_pct_raw) body.default_fee_pct = Number(default_fee_pct_raw);
-      if (subscription_status) body.subscription_status = subscription_status;
-      if (subscription_until_raw) body.subscription_until = subscription_until_raw;
-      if (active_raw === 'true') body.active = true;
-      if (active_raw === 'false') body.active = false;
+        return false;
+      }
 
-      const r = await fetch('/admin/client/update', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-key': ADMIN_KEY
-        },
-        body: JSON.stringify(body)
-      });
+      async function updateClient(ev) {
+        ev.preventDefault();
 
-      const j = await r.json();
-      document.getElementById('updateClientResp').textContent =
-        j.ok ? ('OK: ' + j.client_id + ' actualizado') : JSON.stringify(j);
+        const fd = new FormData(ev.target);
 
-      return false;
-    }
-     
-    async function registerDevice(ev) {
-      ev.preventDefault();
+        const body = {
+          client_id: String(fd.get('client_id') || '').trim()
+        };
 
-      const fd = new FormData(ev.target);
+        const display_name = String(fd.get('display_name') || '').trim();
+        const plan_type = String(fd.get('plan_type') || '').trim();
+        const default_fee_pct_raw = String(fd.get('default_fee_pct') || '').trim();
+        const subscription_status = String(fd.get('subscription_status') || '').trim();
+        const subscription_until_raw = String(fd.get('subscription_until') || '').trim();
+        const active_raw = String(fd.get('active') || '').trim();
 
-      const body = {
-        client_id: String(fd.get('client_id') || '').trim(),
-        dev: String(fd.get('dev') || '').trim(),
-        ap_password: String(fd.get('ap_password') || '').trim(),
-        kind: String(fd.get('kind') || 'beer_tap').trim()
-      };
+        if (display_name) body.display_name = display_name;
+        if (plan_type) body.plan_type = plan_type;
+        if (default_fee_pct_raw) body.default_fee_pct = Number(default_fee_pct_raw);
+        if (subscription_status) body.subscription_status = subscription_status;
+        if (subscription_until_raw) body.subscription_until = subscription_until_raw;
+        if (active_raw === 'true') body.active = true;
+        if (active_raw === 'false') body.active = false;
 
-      const r = await fetch('/device/register', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body)
-      });
+        const r = await fetch('/admin/client/update', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-key': ADMIN_KEY
+          },
+          body: JSON.stringify(body)
+        });
 
-      const j = await r.json();
-      document.getElementById('registerDeviceResp').textContent =
-        j.ok ? ('OK: ' + j.dev + ' registrado') : JSON.stringify(j);
+        const j = await r.json();
+        document.getElementById('updateClientResp').textContent =
+          j.ok ? ('OK: ' + j.client_id + ' actualizado. Recargá el panel.') : JSON.stringify(j);
 
-      return false;
-    }
+        return false;
+      }
 
+      async function deleteClient(client_id) {
+        if (!confirm('Eliminar client ' + client_id + '?')) return false;
+
+        const r = await fetch('/admin/client/delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-key': ADMIN_KEY
+          },
+          body: JSON.stringify({ client_id })
+        });
+
+        const j = await r.json();
+        document.getElementById('deleteClientResp').textContent =
+          j.ok ? ('OK: ' + j.client_id + ' eliminado. Recargá el panel.') : JSON.stringify(j);
+
+        return false;
+      }
+
+      async function registerDevice(ev) {
+        ev.preventDefault();
+
+        const fd = new FormData(ev.target);
+
+        const body = {
+          client_id: String(fd.get('client_id') || '').trim(),
+          dev: String(fd.get('dev') || '').trim(),
+          ap_password: String(fd.get('ap_password') || '').trim(),
+          kind: String(fd.get('kind') || 'beer_tap').trim()
+        };
+
+        const r = await fetch('/device/register', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(body)
+        });
+
+        const j = await r.json();
+        document.getElementById('registerDeviceResp').textContent =
+          j.ok ? ('OK: ' + j.dev + ' registrado') : JSON.stringify(j);
+
+        return false;
+      }
     </script>
   </body>
   </html>
@@ -1975,6 +2082,7 @@ app.get('/panel', requireAdmin, (req, res) => {
 
   res.send(html);
 });
+
 
 // ================== IPN / WEBHOOK ==================
 
