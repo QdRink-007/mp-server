@@ -172,15 +172,15 @@ function saveDevices(devicesData) {
   }
 }
 
-// tokensByDev[dev] = { access_token, refresh_token, expires_at, user_id, ... }
-let tokensByDev = loadTokens();
+// tokensByClient[client_id] = { access_token, refresh_token, expires_at, user_id, ... }
+let tokensByClient = loadTokens();
 let devicesData = loadDevices();
 let clientsData = loadClients();
 
 ensureDeviceKeys();
 
 console.log('🔑 tokens.json existe?', fs.existsSync(TOKENS_PATH));
-console.log('🔑 tokens cargados:', Object.keys(tokensByDev));
+console.log('🔑 tokens cargados por cliente:', Object.keys(tokensByClient));
 console.log('🧩 devices.json existe?', fs.existsSync(DEVICES_PATH));
 console.log('🧩 devices cargados:', Object.keys(devicesData.devices || {}));
 console.log('👤 clients.json existe?', fs.existsSync(CLIENTS_PATH));
@@ -277,6 +277,44 @@ function getClient(clientId) {
   const clients = getClients();
   return clients[String(clientId || '').trim()] || null;
 }
+
+function normalizeTokensToClients() {
+  let changed = false;
+  const normalized = {};
+
+  for (const [key, tok] of Object.entries(tokensByClient || {})) {
+    if (!tok || typeof tok !== 'object' || !tok.access_token) continue;
+
+    const keyStr = String(key || '').trim();
+    const client = getClient(keyStr);
+
+    if (client) {
+      normalized[keyStr] = tok;
+      continue;
+    }
+
+    const device = getDevice(keyStr);
+    const legacyClientId = String(device?.client_id || '').trim();
+
+    if (legacyClientId) {
+      if (!normalized[legacyClientId]) {
+        normalized[legacyClientId] = tok;
+      }
+      changed = true;
+      console.log(`🔁 Migré token legacy dev=${keyStr} -> client_id=${legacyClientId}`);
+      continue;
+    }
+
+    normalized[keyStr] = tok;
+  }
+
+  if (changed) {
+    tokensByClient = normalized;
+    saveTokens(tokensByClient);
+  }
+}
+
+normalizeTokensToClients();
 
 function isDateExpired(dateStr) {
   if (!dateStr) return false;
@@ -397,16 +435,34 @@ function escapeHtml(str) {
 
 // ================== OAUTH ==================
 
+function buildOauthStateForClient(client_id) {
+  return `client:${String(client_id || '').trim()}`;
+}
+
+function parseOauthState(stateRaw) {
+  const s = String(stateRaw || '').trim();
+
+  if (s.startsWith('client:')) {
+    return { kind: 'client', client_id: s.slice('client:'.length) };
+  }
+
+  return { kind: 'legacy_dev', dev: s.toLowerCase() };
+}
+
+
 app.get('/connect', (req, res) => {
-  const dev = String(req.query.dev || '').toLowerCase();
-  if (!isDeviceEnabled(dev)) return res.status(400).send('dev invalido');
+  const client_id = String(req.query.client_id || '').trim();
+  const client = getClient(client_id);
+
+  if (!client) return res.status(404).send('client_id invalido');
+  if (client.active !== true) return res.status(403).send('cliente inactivo');
 
   const authUrl =
     `https://auth.mercadopago.com.ar/authorization` +
     `?response_type=code` +
     `&client_id=${encodeURIComponent(MP_CLIENT_ID)}` +
     `&redirect_uri=${encodeURIComponent(MP_REDIRECT_URI)}` +
-    `&state=${encodeURIComponent(dev)}`;
+    `&state=${encodeURIComponent(buildOauthStateForClient(client_id))}`;
 
   res.redirect(authUrl);
 });
@@ -414,10 +470,24 @@ app.get('/connect', (req, res) => {
 app.get('/oauth/callback', async (req, res) => {
   try {
     const code = String(req.query.code || '');
-    const dev = String(req.query.state || '').toLowerCase();
+    const parsed = parseOauthState(req.query.state);
 
     if (!code) return res.status(400).send('Falta code');
-    if (!isDeviceEnabled(dev)) return res.status(400).send('State/dev invalido');
+
+    let client_id = null;
+
+    if (parsed.kind === 'client') {
+      client_id = String(parsed.client_id || '').trim();
+      const client = getClient(client_id);
+      if (!client) return res.status(400).send('State/client_id invalido');
+    } else {
+      const dev = String(parsed.dev || '').toLowerCase();
+      if (!isDeviceEnabled(dev)) return res.status(400).send('State/dev invalido');
+
+      const device = getDevice(dev);
+      client_id = String(device?.client_id || '').trim();
+      if (!client_id) return res.status(400).send('El dev no tiene client_id');
+    }
 
     const form = new URLSearchParams();
     form.append('grant_type', 'authorization_code');
@@ -433,7 +503,7 @@ app.get('/oauth/callback', async (req, res) => {
     const t = tokenRes.data;
     const expiresAt = Date.now() + (Number(t.expires_in || 0) * 1000);
 
-    tokensByDev[dev] = {
+    tokensByClient[client_id] = {
       access_token: t.access_token,
       refresh_token: t.refresh_token,
       token_type: t.token_type,
@@ -443,12 +513,12 @@ app.get('/oauth/callback', async (req, res) => {
       updated_at: Date.now(),
     };
 
-    saveTokens(tokensByDev);
+    saveTokens(tokensByClient);
 
     res.send(
       `<h2>✅ Conectado OK</h2>
-       <p>Dev: <b>${escapeHtml(dev)}</b></p>
-       <p>Ya podés generar links para este dev usando la cuenta del vendedor.</p>
+       <p>Cliente: <b>${escapeHtml(client_id)}</b></p>
+       <p>Ya podés cobrar con todos los devices de este cliente.</p>
        <p>Volvé al <a href="/panel">/panel</a></p>`
     );
   } catch (err) {
@@ -457,9 +527,9 @@ app.get('/oauth/callback', async (req, res) => {
   }
 });
 
-async function refreshTokenForDev(dev) {
-  const current = tokensByDev[dev];
-  if (!current?.refresh_token) throw new Error(`No hay refresh_token para ${dev}`);
+async function refreshTokenForClient(client_id) {
+  const current = tokensByClient[client_id];
+  if (!current?.refresh_token) throw new Error(`No hay refresh_token para client_id=${client_id}`);
 
   const form = new URLSearchParams();
   form.append('grant_type', 'refresh_token');
@@ -474,7 +544,7 @@ async function refreshTokenForDev(dev) {
   const t = tokenRes.data;
   const expiresAt = Date.now() + (Number(t.expires_in || 0) * 1000);
 
-  tokensByDev[dev] = {
+  tokensByClient[client_id] = {
     access_token: t.access_token,
     refresh_token: t.refresh_token || current.refresh_token,
     token_type: t.token_type,
@@ -484,8 +554,29 @@ async function refreshTokenForDev(dev) {
     updated_at: Date.now(),
   };
 
-  saveTokens(tokensByDev);
-  return tokensByDev[dev].access_token;
+  saveTokens(tokensByClient);
+  return tokensByClient[client_id].access_token;
+}
+
+async function getAccessTokenForClient(client_id) {
+  const id = String(client_id || '').trim();
+  if (!id) return null;
+
+  const t = tokensByClient[id];
+  if (!t?.access_token) return null;
+
+  const marginMs = 60_000;
+  if (t.expires_at && Date.now() > (t.expires_at - marginMs)) {
+    try {
+      console.log(`🔁 Refresh token para client_id=${id}...`);
+      return await refreshTokenForClient(id);
+    } catch (e) {
+      console.error(`❌ No pude refrescar token para client_id=${id}:`, e.response?.data || e.message);
+      return null;
+    }
+  }
+
+  return t.access_token;
 }
 
 async function getAccessTokenForDev(dev) {
@@ -503,21 +594,10 @@ async function getAccessTokenForDev(dev) {
     return null;
   }
 
-  const t = tokensByDev[dev];
-  if (!t?.access_token) return null;
+  const client_id = String(cfg.client_id || '').trim();
+  if (!client_id) return null;
 
-  const marginMs = 60_000;
-  if (t.expires_at && Date.now() > (t.expires_at - marginMs)) {
-    try {
-      console.log(`🔁 Refresh token para ${dev}...`);
-      return await refreshTokenForDev(dev);
-    } catch (e) {
-      console.error(`❌ No pude refrescar token para ${dev}:`, e.response?.data || e.message);
-      return null;
-    }
-  }
-
-  return t.access_token;
+  return await getAccessTokenForClient(client_id);
 }
 
 // ================== MP: CREAR PREFERENCIA ==================
@@ -757,7 +837,7 @@ app.get('/admin/devices', requireAdmin, (req, res) => {
       dev,
       ...cfg,
       state: stateByDev[dev] || null,
-      oauth_connected: !!tokensByDev[dev]?.access_token,
+      oauth_connected: !!tokensByClient[String(cfg?.client_id || '').trim()]?.access_token,
     }));
 
     res.json({
@@ -1169,10 +1249,6 @@ app.post('/admin/device/delete', requireAdmin, (req, res) => {
       saveState(stateByDev);
     }
 
-    if (tokensByDev[dev]) {
-      delete tokensByDev[dev];
-      saveTokens(tokensByDev);
-    }
 
     res.json({ ok: true, dev });
   } catch (e) {
@@ -1197,11 +1273,16 @@ app.get('/admin/clients', requireAdmin, (req, res) => {
           kind: d.kind
         }));
 
+      const tok = tokensByClient[client_id] || null;
+
       return {
         client_id,
         ...cfg,
         devices_count: clientDevices.length,
-        devices: clientDevices
+        devices: clientDevices,
+        oauth_connected: !!tok?.access_token,
+        oauth_user_id: tok?.user_id || null,
+        oauth_updated_at: tok?.updated_at || null
       };
     });
 
@@ -1386,6 +1467,11 @@ app.post('/admin/client/delete', requireAdmin, (req, res) => {
     delete clientsData.clients[client_id];
     saveClients(clientsData);
 
+    if (tokensByClient[client_id]) {
+      delete tokensByClient[client_id];
+      saveTokens(tokensByClient);
+    }
+
     res.json({ ok: true, client_id });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1423,7 +1509,7 @@ app.get('/panel', requireAdmin, (req, res) => {
   }).join('');
 
   const devicesTableRows = devicesEntries.map(([dev, d]) => {
-    const oauthConnected = !!tokensByDev[dev]?.access_token;
+    const oauthConnected = !!tokensByClient[String(d.client_id || '').trim()]?.access_token;
     const st = stateByDev[dev] || {};
     return `
       <tr>
@@ -1446,6 +1532,9 @@ app.get('/panel', requireAdmin, (req, res) => {
     const linkedDevices = devicesEntries
       .filter(([, d]) => d?.client_id === client_id)
       .map(([dev]) => dev);
+    const tok = tokensByClient[client_id] || null;
+    const oauthConnected = !!tok?.access_token;
+    const oauthUpdated = tok?.updated_at ? new Date(tok.updated_at).toLocaleString('es-AR') : '';
 
     return `
       <tr>
@@ -1457,6 +1546,10 @@ app.get('/panel', requireAdmin, (req, res) => {
         <td>${escapeHtml(String(cfg.subscription_until || ''))}</td>
         <td>${escapeHtml(String(cfg.active))}</td>
         <td>${escapeHtml(linkedDevices.join(', '))}</td>
+        <td>${oauthConnected ? 'sí' : 'no'}</td>
+        <td>${escapeHtml(String(tok?.user_id || ''))}</td>
+        <td>${escapeHtml(String(oauthUpdated || ''))}</td>
+        <td><a href="/connect?client_id=${encodeURIComponent(client_id)}&key=${encodeURIComponent(ADMIN_KEY)}">Conectar MP</a></td>
         <td><button type="button" onclick="deleteClient('${escapeHtml(client_id)}')">Eliminar</button></td>
       </tr>
     `;
@@ -1500,12 +1593,12 @@ app.get('/panel', requireAdmin, (req, res) => {
     ${deviceConfigBoxes || '<div class="box"><div class="muted">No hay devices cargados todavía.</div></div>'}
 
     <div class="box">
-      <div class="muted">Conectar vendedor (devices OAuth habilitados):</div>
+      <div class="muted">Conectar vendedor (OAuth por cliente):</div>
       <ul>
-        ${devicesEntries
-          .filter(([, d]) => d?.enabled === true && d?.token_mode === 'oauth_seller')
-          .map(([dev]) => `<li><a href="/connect?dev=${encodeURIComponent(dev)}&key=${encodeURIComponent(ADMIN_KEY)}">/connect?dev=${escapeHtml(dev)}</a></li>`)
-          .join('') || '<li class="muted">No hay devices oauth_seller habilitados.</li>'}
+        ${clientsEntries
+          .filter(([client_id]) => devicesEntries.some(([, d]) => d?.client_id === client_id && d?.enabled === true && d?.token_mode === 'oauth_seller'))
+          .map(([client_id, cfg]) => `<li><a href="/connect?client_id=${encodeURIComponent(client_id)}&key=${encodeURIComponent(ADMIN_KEY)}">/connect?client_id=${escapeHtml(client_id)}</a> <span class="muted">(${escapeHtml(String(cfg.display_name || ''))})</span></li>`)
+          .join('') || '<li class="muted">No hay clientes con devices oauth_seller habilitados.</li>'}
       </ul>
     </div>
 
@@ -1768,9 +1861,13 @@ app.get('/panel', requireAdmin, (req, res) => {
           <th>Hasta</th>
           <th>Activo</th>
           <th>Devices</th>
+          <th>OAuth</th>
+          <th>user_id MP</th>
+          <th>OAuth updated</th>
+          <th>Conectar</th>
           <th>Acción</th>
         </tr>
-        ${clientsTableRows || '<tr><td colspan="9" class="muted">No hay clients cargados.</td></tr>'}
+        ${clientsTableRows || '<tr><td colspan="13" class="muted">No hay clients cargados.</td></tr>'}
       </table>
       <div class="muted" id="deleteClientResp" style="margin-top:6px;"></div>
     </div>
@@ -1788,7 +1885,7 @@ app.get('/panel', requireAdmin, (req, res) => {
           <th>Token</th>
           <th>Enabled</th>
           <th>Kind</th>
-          <th>OAuth</th>
+          <th>OAuth cliente</th>
           <th>Acción</th>
         </tr>
         ${devicesTableRows || '<tr><td colspan="11" class="muted">No hay devices cargados.</td></tr>'}
@@ -2126,15 +2223,15 @@ app.post('/ipn', async (req, res) => {
     } catch (e) {
       // 2) fallback: intentar con tokens de vendedores guardados
       console.log('ℹ️ No pude leer pago con token marketplace, pruebo tokens vendedores...');
-      const devs = Object.keys(tokensByDev);
+      const clientIds = Object.keys(tokensByClient);
       let lastErr = e;
 
-      for (const dev of devs) {
-        const tok = await getAccessTokenForDev(dev);
+      for (const client_id of clientIds) {
+        const tok = await getAccessTokenForClient(client_id);
         if (!tok) continue;
         try {
           mpRes = await fetchPaymentWithToken(paymentId, tok);
-          console.log(`✅ Leí el pago con token del dev=${dev}`);
+          console.log(`✅ Leí el pago con token del client_id=${client_id}`);
           lastErr = null;
           break;
         } catch (ee) {
@@ -2269,8 +2366,9 @@ app.listen(PORT, () => {
     }
 
     if (tokenMode === 'oauth_seller') {
-      if (!tokensByDev[dev]?.access_token) {
-        console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
+      const client_id = String(cfg.client_id || '').trim();
+      if (!tokensByClient[client_id]?.access_token) {
+        console.log(`ℹ️ ${dev} sin OAuth de cliente: no genero link inicial.`);
         return;
       }
       recargarLinkConReintento(dev);
