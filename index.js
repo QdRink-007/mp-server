@@ -413,6 +413,7 @@ console.log('🧩 devices habilitados:', getAllowedDevs());
 
 const pagos = [];
 const processedPayments = new Set();
+const processingPayments = new Set();
 
 // ================== HELPERS ==================
 
@@ -1908,7 +1909,13 @@ app.get('/panel', requireAdmin, (req, res) => {
       </tr>
   `;
 
-  pagos.slice().reverse().forEach((p) => {
+  const pagosUnicos = Array.from(
+    new Map(
+      pagos.map((p) => [String(p.payment_id || ''), p])
+    ).values()
+  );
+
+  pagosUnicos.slice().reverse().forEach((p) => {
     html += `
       <tr>
         <td>${escapeHtml(String(p.fechaHora || ''))}</td>
@@ -2190,6 +2197,8 @@ async function fetchPaymentWithToken(paymentId, token) {
 }
 
 app.post('/ipn', async (req, res) => {
+  let pid = '';
+
   try {
     console.log('📥 IPN recibida:', { query: req.query, body: req.body });
 
@@ -2211,15 +2220,19 @@ app.post('/ipn', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    if (processedPayments.has(String(paymentId))) {
-      console.log('ℹ️ Pago ya procesado, ignoro:', paymentId);
+    pid = String(paymentId);
+
+    if (processedPayments.has(pid) || processingPayments.has(pid)) {
+      console.log('ℹ️ Pago ya procesado o en proceso, ignoro:', pid);
       return res.sendStatus(200);
     }
+
+    processingPayments.add(pid);
 
     // 1) intentar con tu token
     let mpRes;
     try {
-      mpRes = await fetchPaymentWithToken(paymentId, ACCESS_TOKEN);
+      mpRes = await fetchPaymentWithToken(pid, ACCESS_TOKEN);
     } catch (e) {
       // 2) fallback: intentar con tokens de vendedores guardados
       console.log('ℹ️ No pude leer pago con token marketplace, pruebo tokens vendedores...');
@@ -2230,7 +2243,7 @@ app.post('/ipn', async (req, res) => {
         const tok = await getAccessTokenForClient(client_id);
         if (!tok) continue;
         try {
-          mpRes = await fetchPaymentWithToken(paymentId, tok);
+          mpRes = await fetchPaymentWithToken(pid, tok);
           console.log(`✅ Leí el pago con token del client_id=${client_id}`);
           lastErr = null;
           break;
@@ -2256,14 +2269,22 @@ app.post('/ipn', async (req, res) => {
     const externalRef = data.external_reference || null;
     const preference_id = data.preference_id || null;
 
-    console.log('📩 Pago recibido:', { estado, status_detail, email, monto, metodo, externalRef, preference_id });
+    console.log('📩 Pago recibido:', {
+      estado,
+      status_detail,
+      email,
+      monto,
+      metodo,
+      externalRef,
+      preference_id
+    });
 
     const dev = (externalRef ? String(externalRef).split(':')[0] : '').toLowerCase();
     const devValido = isDeviceEnabled(dev);
 
     if (estado !== 'approved') {
       console.log(`⚠️ Pago NO aprobado (${estado}). detalle:`, status_detail);
-      processedPayments.add(String(paymentId));
+      processedPayments.add(pid);
       return res.sendStatus(200);
     }
 
@@ -2272,51 +2293,54 @@ app.post('/ipn', async (req, res) => {
     const okPref = !!(st && preference_id && preference_id === st.ultimaPreferencia);
 
     if (devValido && (okExt || okPref)) {
-    const fechaHora = nowAR();
+      const fechaHora = nowAR();
 
-    st.paidEvent = {
-      payment_id: String(paymentId),
-      at: Date.now(),
-      fechaHora, // ✅ para imprimir en el ticket sin RTC
-      monto,
-      metodo,
-      email,
-      extRef: externalRef,
-      title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
-      price: stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100
-    };
+      st.paidEvent = {
+        payment_id: pid,
+        at: Date.now(),
+        fechaHora,
+        monto,
+        metodo,
+        email,
+        extRef: externalRef,
+        title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
+        price: stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100
+      };
 
-    saveState(stateByDev);
-    processedPayments.add(String(paymentId));
+      saveState(stateByDev);
 
-    console.log(`✅ Pago confirmado y válido para ${dev} (guardado hasta ACK)`);
+      console.log(`✅ Pago confirmado y válido para ${dev} (guardado hasta ACK)`);
 
-    // y acá seguís igual con el registro para la tabla:
-    const registro = {
-      fechaHora,
-      dev,
-      email,
-      estado,
-      monto,
-      metodo,
-      descripcion,
-      payment_id: String(paymentId),
-      preference_id,
-      external_reference: externalRef,
-      title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
-    };
-    pagos.push(registro);
+      const registro = {
+        fechaHora,
+        dev,
+        email,
+        estado,
+        monto,
+        metodo,
+        descripcion,
+        payment_id: pid,
+        preference_id,
+        external_reference: externalRef,
+        title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
+      };
+
+      if (!pagos.some((p) => String(p.payment_id || '') === pid)) {
+        pagos.push(registro);
+      } else {
+        console.log('ℹ️ Registro ya existente en tabla, no duplico:', pid);
+      }
 
       const logMsg =
-       `🕒 ${fechaHora} | Dev: ${dev}` +
-       ` | Producto: ${(stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto')}` +
-       ` | Monto: ${monto}` +
-       ` | Pago de: ${email}` +
-       ` | Estado: ${estado}` +
-       ` | extRef: ${externalRef}` +
-       ` | pref: ${preference_id}` +
-       ` | id: ${paymentId}` +
-       ` | price: ${stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100}\n`;
+        `🕒 ${fechaHora} | Dev: ${dev}` +
+        ` | Producto: ${(stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto')}` +
+        ` | Monto: ${monto}` +
+        ` | Pago de: ${email}` +
+        ` | Estado: ${estado}` +
+        ` | extRef: ${externalRef}` +
+        ` | pref: ${preference_id}` +
+        ` | id: ${pid}` +
+        ` | price: ${stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100}\n`;
 
       fs.appendFileSync(PAYLOG_PATH, logMsg);
 
@@ -2327,23 +2351,29 @@ app.post('/ipn', async (req, res) => {
           st.rotateScheduled = false;
         }, ROTATE_DELAY_MS);
       }
-    } else {
-      console.log('⚠️ Pago aprobado pero NO corresponde al QR vigente (o dev inválido). Ignorado.');
-      console.log('🧪 DEBUG mismatch:', {
-        dev,
-        externalRef,
-        expectedExtRef: stateByDev[dev]?.expectedExtRef,
-        preference_id,
-        ultimaPreferencia: stateByDev[dev]?.ultimaPreferencia,
-      });
 
-      processedPayments.add(String(paymentId));
+      processedPayments.add(pid);
+      return res.sendStatus(200);
     }
 
-    res.sendStatus(200);
+    console.log('⚠️ Pago aprobado pero NO corresponde al QR vigente (o dev inválido). Ignorado.');
+    console.log('🧪 DEBUG mismatch:', {
+      dev,
+      externalRef,
+      expectedExtRef: stateByDev[dev]?.expectedExtRef,
+      preference_id,
+      ultimaPreferencia: stateByDev[dev]?.ultimaPreferencia,
+    });
+
+    processedPayments.add(pid);
+    return res.sendStatus(200);
   } catch (error) {
     console.error('❌ Error en /ipn:', error.response?.data || error.message);
-    res.sendStatus(200);
+    return res.sendStatus(200);
+  } finally {
+    if (pid) {
+      processingPayments.delete(pid);
+    }
   }
 });
 
