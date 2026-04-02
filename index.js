@@ -42,19 +42,24 @@ console.log('📦 DATA_DIR:', DATA_DIR);
 
 // Comisión por DEV (porcentaje + piso mínimo)
 const MARKETPLACE_FEE_PERCENT_BY_DEV = {
-  bar1: 0,     // bar1 cobra a tu cuenta → sin comisión
-  bar2: 0,  // 10%
+  bar1: 0,
+  bar2: 0,
   bar3: 0,
+  bar4: 0,
+  bar5: 0,
 };
 
 const MARKETPLACE_FEE_MIN = 10; // piso mínimo en pesos
 
-const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3'];
+const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3', 'bar4', 'bar5'];
 
 const ITEM_BY_DEV = {
   bar1: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 100 },
   bar2: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 110 },
-  bar3: { title: 'Stella Artois',  quantity: 1, currency_id: 'ARS', unit_price: 120 },
+  bar3: { title: 'Stella Artois', quantity: 1, currency_id: 'ARS', unit_price: 120 },
+
+  bar4: { title: 'Ticket QR', quantity: 1, currency_id: 'ARS', unit_price: 1000 },
+  bar5: { title: 'Ticket QR', quantity: 1, currency_id: 'ARS', unit_price: 1000 },
 };
 
 // ================== TOKENS STORE (por dev) ==================
@@ -252,12 +257,17 @@ async function refreshTokenForDev(dev) {
 }
 
 async function getAccessTokenForDev(dev) {
-  // ✅ bar1/bar2/bar3 cobran a TU cuenta (sin OAuth)
-  if (dev === 'bar1' || dev === 'bar2' || dev === 'bar3') {
+  // ✅ todos estos cobran a TU cuenta (sin OAuth)
+  if (
+    dev === 'bar1' ||
+    dev === 'bar2' ||
+    dev === 'bar3' ||
+    dev === 'bar4' ||
+    dev === 'bar5'
+  ) {
     return ACCESS_TOKEN;
   }
 
-  // (si en el futuro agregás otros devs OAuth, quedaría acá)
   const t = tokensByDev[dev];
   if (!t?.access_token) return null;
 
@@ -674,22 +684,28 @@ app.post('/ipn', async (req, res) => {
 
 // ================== ARRANQUE ==================
 
-app.listen(PORT, () => {
+pp.listen(PORT, () => {
   console.log(`Servidor activo en http://localhost:${PORT}`);
   console.log('Generando links iniciales por dev...');
 
   ALLOWED_DEVS.forEach((dev) => {
-    // ✅ bar1/bar2/bar3 siempre generan (usan tu ACCESS_TOKEN)
-    if (dev === 'bar1' || dev === 'bar2' || dev === 'bar3') {
+    // ✅ todos estos generan usando tu ACCESS_TOKEN
+    if (
+      dev === 'bar1' ||
+      dev === 'bar2' ||
+      dev === 'bar3' ||
+      dev === 'bar4' ||
+      dev === 'bar5'
+    ) {
       recargarLinkConReintento(dev);
       return;
     }
 
-    // (si en el futuro agregás devs OAuth)
     if (!tokensByDev[dev]?.access_token) {
       console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
       return;
     }
+
     recargarLinkConReintento(dev);
   });
 });
