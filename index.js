@@ -132,7 +132,30 @@ function pruneStateByDevices(stateObj) {
 
 function loadDevices() {
   const seed = {
-    devices: {}
+    devices: {
+      bar1: {
+        client_id: 'mariano',
+        title: 'Quilmes',
+        quantity: 1,
+        currency_id: 'ARS',
+        unit_price: 3000,
+        fee_pct: 0,
+        token_mode: 'main_account',
+        enabled: true,
+        kind: 'beer_tap'
+      },
+      bar4: {
+        client_id: 'socio1',
+        title: 'Qtiket',
+        quantity: 1,
+        currency_id: 'ARS',
+        unit_price: 4500,
+        fee_pct: 0.03,
+        token_mode: 'oauth_seller',
+        enabled: true,
+        kind: 'ticket'
+      }
+    }
   };
 
   try {
@@ -172,15 +195,15 @@ function saveDevices(devicesData) {
   }
 }
 
-// tokensByClient[client_id] = { access_token, refresh_token, expires_at, user_id, ... }
-let tokensByClient = loadTokens();
+// tokensByDev[dev] = { access_token, refresh_token, expires_at, user_id, ... }
+let tokensByDev = loadTokens();
 let devicesData = loadDevices();
 let clientsData = loadClients();
 
 ensureDeviceKeys();
 
 console.log('🔑 tokens.json existe?', fs.existsSync(TOKENS_PATH));
-console.log('🔑 tokens cargados por cliente:', Object.keys(tokensByClient));
+console.log('🔑 tokens cargados:', Object.keys(tokensByDev));
 console.log('🧩 devices.json existe?', fs.existsSync(DEVICES_PATH));
 console.log('🧩 devices cargados:', Object.keys(devicesData.devices || {}));
 console.log('👤 clients.json existe?', fs.existsSync(CLIENTS_PATH));
@@ -237,7 +260,24 @@ function ensureDeviceKeys() {
 
 function loadClients() {
   const seed = {
-    clients: {}
+    clients: {
+      mariano: {
+        display_name: 'Mariano',
+        plan_type: 'direct',
+        default_fee_pct: 0,
+        subscription_status: 'active',
+        subscription_until: null,
+        active: true
+      },
+      cliente01: {
+        display_name: 'Cliente 01',
+        plan_type: 'subscription',
+        default_fee_pct: 0.03,
+        subscription_status: 'active',
+        subscription_until: null,
+        active: true
+      }
+    }
   };
 
   try {
@@ -277,44 +317,6 @@ function getClient(clientId) {
   const clients = getClients();
   return clients[String(clientId || '').trim()] || null;
 }
-
-function normalizeTokensToClients() {
-  let changed = false;
-  const normalized = {};
-
-  for (const [key, tok] of Object.entries(tokensByClient || {})) {
-    if (!tok || typeof tok !== 'object' || !tok.access_token) continue;
-
-    const keyStr = String(key || '').trim();
-    const client = getClient(keyStr);
-
-    if (client) {
-      normalized[keyStr] = tok;
-      continue;
-    }
-
-    const device = getDevice(keyStr);
-    const legacyClientId = String(device?.client_id || '').trim();
-
-    if (legacyClientId) {
-      if (!normalized[legacyClientId]) {
-        normalized[legacyClientId] = tok;
-      }
-      changed = true;
-      console.log(`🔁 Migré token legacy dev=${keyStr} -> client_id=${legacyClientId}`);
-      continue;
-    }
-
-    normalized[keyStr] = tok;
-  }
-
-  if (changed) {
-    tokensByClient = normalized;
-    saveTokens(tokensByClient);
-  }
-}
-
-normalizeTokensToClients();
 
 function isDateExpired(dateStr) {
   if (!dateStr) return false;
@@ -413,7 +415,6 @@ console.log('🧩 devices habilitados:', getAllowedDevs());
 
 const pagos = [];
 const processedPayments = new Set();
-const processingPayments = new Set();
 
 // ================== HELPERS ==================
 
@@ -436,34 +437,16 @@ function escapeHtml(str) {
 
 // ================== OAUTH ==================
 
-function buildOauthStateForClient(client_id) {
-  return `client:${String(client_id || '').trim()}`;
-}
-
-function parseOauthState(stateRaw) {
-  const s = String(stateRaw || '').trim();
-
-  if (s.startsWith('client:')) {
-    return { kind: 'client', client_id: s.slice('client:'.length) };
-  }
-
-  return { kind: 'legacy_dev', dev: s.toLowerCase() };
-}
-
-
 app.get('/connect', (req, res) => {
-  const client_id = String(req.query.client_id || '').trim();
-  const client = getClient(client_id);
-
-  if (!client) return res.status(404).send('client_id invalido');
-  if (client.active !== true) return res.status(403).send('cliente inactivo');
+  const dev = String(req.query.dev || '').toLowerCase();
+  if (!isDeviceEnabled(dev)) return res.status(400).send('dev invalido');
 
   const authUrl =
     `https://auth.mercadopago.com.ar/authorization` +
     `?response_type=code` +
     `&client_id=${encodeURIComponent(MP_CLIENT_ID)}` +
     `&redirect_uri=${encodeURIComponent(MP_REDIRECT_URI)}` +
-    `&state=${encodeURIComponent(buildOauthStateForClient(client_id))}`;
+    `&state=${encodeURIComponent(dev)}`;
 
   res.redirect(authUrl);
 });
@@ -471,24 +454,10 @@ app.get('/connect', (req, res) => {
 app.get('/oauth/callback', async (req, res) => {
   try {
     const code = String(req.query.code || '');
-    const parsed = parseOauthState(req.query.state);
+    const dev = String(req.query.state || '').toLowerCase();
 
     if (!code) return res.status(400).send('Falta code');
-
-    let client_id = null;
-
-    if (parsed.kind === 'client') {
-      client_id = String(parsed.client_id || '').trim();
-      const client = getClient(client_id);
-      if (!client) return res.status(400).send('State/client_id invalido');
-    } else {
-      const dev = String(parsed.dev || '').toLowerCase();
-      if (!isDeviceEnabled(dev)) return res.status(400).send('State/dev invalido');
-
-      const device = getDevice(dev);
-      client_id = String(device?.client_id || '').trim();
-      if (!client_id) return res.status(400).send('El dev no tiene client_id');
-    }
+    if (!isDeviceEnabled(dev)) return res.status(400).send('State/dev invalido');
 
     const form = new URLSearchParams();
     form.append('grant_type', 'authorization_code');
@@ -504,7 +473,7 @@ app.get('/oauth/callback', async (req, res) => {
     const t = tokenRes.data;
     const expiresAt = Date.now() + (Number(t.expires_in || 0) * 1000);
 
-    tokensByClient[client_id] = {
+    tokensByDev[dev] = {
       access_token: t.access_token,
       refresh_token: t.refresh_token,
       token_type: t.token_type,
@@ -514,12 +483,12 @@ app.get('/oauth/callback', async (req, res) => {
       updated_at: Date.now(),
     };
 
-    saveTokens(tokensByClient);
+    saveTokens(tokensByDev);
 
     res.send(
       `<h2>✅ Conectado OK</h2>
-       <p>Cliente: <b>${escapeHtml(client_id)}</b></p>
-       <p>Ya podés cobrar con todos los devices de este cliente.</p>
+       <p>Dev: <b>${escapeHtml(dev)}</b></p>
+       <p>Ya podés generar links para este dev usando la cuenta del vendedor.</p>
        <p>Volvé al <a href="/panel">/panel</a></p>`
     );
   } catch (err) {
@@ -528,9 +497,9 @@ app.get('/oauth/callback', async (req, res) => {
   }
 });
 
-async function refreshTokenForClient(client_id) {
-  const current = tokensByClient[client_id];
-  if (!current?.refresh_token) throw new Error(`No hay refresh_token para client_id=${client_id}`);
+async function refreshTokenForDev(dev) {
+  const current = tokensByDev[dev];
+  if (!current?.refresh_token) throw new Error(`No hay refresh_token para ${dev}`);
 
   const form = new URLSearchParams();
   form.append('grant_type', 'refresh_token');
@@ -545,7 +514,7 @@ async function refreshTokenForClient(client_id) {
   const t = tokenRes.data;
   const expiresAt = Date.now() + (Number(t.expires_in || 0) * 1000);
 
-  tokensByClient[client_id] = {
+  tokensByDev[dev] = {
     access_token: t.access_token,
     refresh_token: t.refresh_token || current.refresh_token,
     token_type: t.token_type,
@@ -555,29 +524,8 @@ async function refreshTokenForClient(client_id) {
     updated_at: Date.now(),
   };
 
-  saveTokens(tokensByClient);
-  return tokensByClient[client_id].access_token;
-}
-
-async function getAccessTokenForClient(client_id) {
-  const id = String(client_id || '').trim();
-  if (!id) return null;
-
-  const t = tokensByClient[id];
-  if (!t?.access_token) return null;
-
-  const marginMs = 60_000;
-  if (t.expires_at && Date.now() > (t.expires_at - marginMs)) {
-    try {
-      console.log(`🔁 Refresh token para client_id=${id}...`);
-      return await refreshTokenForClient(id);
-    } catch (e) {
-      console.error(`❌ No pude refrescar token para client_id=${id}:`, e.response?.data || e.message);
-      return null;
-    }
-  }
-
-  return t.access_token;
+  saveTokens(tokensByDev);
+  return tokensByDev[dev].access_token;
 }
 
 async function getAccessTokenForDev(dev) {
@@ -595,10 +543,21 @@ async function getAccessTokenForDev(dev) {
     return null;
   }
 
-  const client_id = String(cfg.client_id || '').trim();
-  if (!client_id) return null;
+  const t = tokensByDev[dev];
+  if (!t?.access_token) return null;
 
-  return await getAccessTokenForClient(client_id);
+  const marginMs = 60_000;
+  if (t.expires_at && Date.now() > (t.expires_at - marginMs)) {
+    try {
+      console.log(`🔁 Refresh token para ${dev}...`);
+      return await refreshTokenForDev(dev);
+    } catch (e) {
+      console.error(`❌ No pude refrescar token para ${dev}:`, e.response?.data || e.message);
+      return null;
+    }
+  }
+
+  return t.access_token;
 }
 
 // ================== MP: CREAR PREFERENCIA ==================
@@ -838,7 +797,7 @@ app.get('/admin/devices', requireAdmin, (req, res) => {
       dev,
       ...cfg,
       state: stateByDev[dev] || null,
-      oauth_connected: !!tokensByClient[String(cfg?.client_id || '').trim()]?.access_token,
+      oauth_connected: !!tokensByDev[dev]?.access_token,
     }));
 
     res.json({
@@ -1228,35 +1187,6 @@ app.post('/admin/device/update', requireAdmin, (req, res) => {
   }
 });
 
-
-app.post('/admin/device/delete', requireAdmin, (req, res) => {
-  try {
-    const dev = String(req.body.dev || '').trim().toLowerCase();
-
-    if (!dev) {
-      return res.status(400).json({ error: 'dev requerido' });
-    }
-
-    const current = getDevice(dev);
-    if (!current) {
-      return res.status(404).json({ error: 'dev no existe' });
-    }
-
-    delete devicesData.devices[dev];
-    saveDevices(devicesData);
-
-    if (stateByDev[dev]) {
-      delete stateByDev[dev];
-      saveState(stateByDev);
-    }
-
-
-    res.json({ ok: true, dev });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 app.get('/admin/clients', requireAdmin, (req, res) => {
   try {
     const clients = getClients();
@@ -1274,16 +1204,11 @@ app.get('/admin/clients', requireAdmin, (req, res) => {
           kind: d.kind
         }));
 
-      const tok = tokensByClient[client_id] || null;
-
       return {
         client_id,
         ...cfg,
         devices_count: clientDevices.length,
-        devices: clientDevices,
-        oauth_connected: !!tok?.access_token,
-        oauth_user_id: tok?.user_id || null,
-        oauth_updated_at: tok?.updated_at || null
+        devices: clientDevices
       };
     });
 
@@ -1439,122 +1364,11 @@ app.post('/admin/client/update', requireAdmin, (req, res) => {
   }
 });
 
-
-app.post('/admin/client/delete', requireAdmin, (req, res) => {
-  try {
-    const client_id = String(req.body.client_id || '').trim();
-
-    if (!client_id) {
-      return res.status(400).json({ error: 'client_id requerido' });
-    }
-
-    const current = getClient(client_id);
-    if (!current) {
-      return res.status(404).json({ error: 'client_id no existe' });
-    }
-
-    const linkedDevices = Object.entries(getDevices())
-      .filter(([, d]) => d?.client_id === client_id)
-      .map(([dev]) => dev);
-
-    if (linkedDevices.length > 0) {
-      return res.status(400).json({
-        error: 'no se puede eliminar el cliente porque tiene devices asociados',
-        code: 'client_has_devices',
-        devices: linkedDevices
-      });
-    }
-
-    delete clientsData.clients[client_id];
-    saveClients(clientsData);
-
-    if (tokensByClient[client_id]) {
-      delete tokensByClient[client_id];
-      saveTokens(tokensByClient);
-    }
-
-    res.json({ ok: true, client_id });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-
 app.get('/panel', requireAdmin, (req, res) => {
-  const devicesEntries = Object.entries(getDevices()).sort((a, b) => a[0].localeCompare(b[0]));
-  const clientsEntries = Object.entries(getClients()).sort((a, b) => a[0].localeCompare(b[0]));
-
-  const deviceConfigBoxes = devicesEntries.map(([dev, d]) => {
-    const st = stateByDev[dev] || {};
-    return `
-    <div class="box">
-      <h3>Config ${escapeHtml(String(d.title || dev))} (${escapeHtml(dev)})</h3>
-      <form method="post" action="/set-item" data-out="setResp_${escapeHtml(dev)}" onsubmit="return sendForm(event)">
-        <input type="hidden" name="dev" value="${escapeHtml(dev)}" />
-
-        <div style="margin:6px 0;">
-          <label>Título:</label><br/>
-          <input name="title" style="width:320px;" value="${escapeHtml(String(st.lastTitle || d.title || 'Producto'))}" />
-        </div>
-
-        <div style="margin:6px 0;">
-          <label>Precio:</label><br/>
-          <input name="price" style="width:120px;" value="${escapeHtml(String(st.lastPrice || d.unit_price || 100))}" />
-        </div>
-
-        <button type="submit">Guardar y regenerar QR</button>
-        <div class="muted" id="setResp_${escapeHtml(dev)}" style="margin-top:6px;"></div>
-      </form>
-    </div>
-    `;
-  }).join('');
-
-  const devicesTableRows = devicesEntries.map(([dev, d]) => {
-    const oauthConnected = !!tokensByClient[String(d.client_id || '').trim()]?.access_token;
-    const st = stateByDev[dev] || {};
-    return `
-      <tr>
-        <td>${escapeHtml(dev)}</td>
-        <td>${escapeHtml(String(d.client_id || ''))}</td>
-        <td>${escapeHtml(String(d.title || ''))}</td>
-        <td>${escapeHtml(String(d.unit_price || ''))}</td>
-        <td>${escapeHtml(String(st.lastPrice || d.unit_price || ''))}</td>
-        <td>${escapeHtml(String(d.fee_pct || 0))}</td>
-        <td>${escapeHtml(String(d.token_mode || ''))}</td>
-        <td>${escapeHtml(String(d.enabled))}</td>
-        <td>${escapeHtml(String(d.kind || ''))}</td>
-        <td>${oauthConnected ? 'sí' : 'no'}</td>
-        <td><button type="button" onclick="deleteDevice('${escapeHtml(dev)}')">Eliminar</button></td>
-      </tr>
-    `;
-  }).join('');
-
-  const clientsTableRows = clientsEntries.map(([client_id, cfg]) => {
-    const linkedDevices = devicesEntries
-      .filter(([, d]) => d?.client_id === client_id)
-      .map(([dev]) => dev);
-    const tok = tokensByClient[client_id] || null;
-    const oauthConnected = !!tok?.access_token;
-    const oauthUpdated = tok?.updated_at ? new Date(tok.updated_at).toLocaleString('es-AR') : '';
-
-    return `
-      <tr>
-        <td>${escapeHtml(client_id)}</td>
-        <td>${escapeHtml(String(cfg.display_name || ''))}</td>
-        <td>${escapeHtml(String(cfg.plan_type || ''))}</td>
-        <td>${escapeHtml(String(cfg.default_fee_pct || 0))}</td>
-        <td>${escapeHtml(String(cfg.subscription_status || ''))}</td>
-        <td>${escapeHtml(String(cfg.subscription_until || ''))}</td>
-        <td>${escapeHtml(String(cfg.active))}</td>
-        <td>${escapeHtml(linkedDevices.join(', '))}</td>
-        <td>${oauthConnected ? 'sí' : 'no'}</td>
-        <td>${escapeHtml(String(tok?.user_id || ''))}</td>
-        <td>${escapeHtml(String(oauthUpdated || ''))}</td>
-        <td><a href="/connect?client_id=${encodeURIComponent(client_id)}&key=${encodeURIComponent(ADMIN_KEY)}">Conectar MP</a></td>
-        <td><button type="button" onclick="deleteClient('${escapeHtml(client_id)}')">Eliminar</button></td>
-      </tr>
-    `;
-  }).join('');
+  const st4 = stateByDev.bar4 || {};
+  const st5 = stateByDev.bar5 || {};
+  const d4 = getDevice('bar4');
+  const d5 = getDevice('bar5');
 
   let html = `
   <html>
@@ -1565,262 +1379,322 @@ app.get('/panel', requireAdmin, (req, res) => {
       body { font-family: sans-serif; background:#111; color:#eee; padding: 10px; }
       a { color: #9ad; }
       table { border-collapse: collapse; width: 100%; margin-top: 10px; }
-      th, td { border: 1px solid #444; padding: 6px 8px; font-size: 13px; vertical-align: top; }
+      th, td { border: 1px solid #444; padding: 6px 8px; font-size: 13px; }
       th { background: #222; }
       tr:nth-child(even) { background:#1b1b1b; }
       .muted { color:#aaa; font-size: 12px; }
       .box { background:#181818; border:1px solid #333; padding:10px; border-radius: 6px; margin-top:10px; }
-      input, select { padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee; }
+      input { padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee; }
       button { padding:8px 12px; border:none; border-radius:4px; background:#2d6cdf; color:white; cursor:pointer; }
       button:hover { opacity:0.9; }
-      .danger { background:#a33; }
-      .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap:10px; }
-      .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#222; border:1px solid #444; margin-right:6px; }
     </style>
   </head>
   <body>
     <h1>Panel QdRink</h1>
 
+    ${d4 ? `
     <div class="box">
-      <div class="muted">Resumen</div>
-      <div style="margin-top:6px;">
-        <span class="pill">Clients: ${clientsEntries.length}</span>
-        <span class="pill">Devices: ${devicesEntries.length}</span>
-        <span class="pill">Devices habilitados: ${getAllowedDevs().length}</span>
-      </div>
-      <div class="muted" style="margin-top:8px;">Ahora el panel ya no depende de bar4/bar5. Todo sale de clients.json y devices.json.</div>
+      <h3>Config ${escapeHtml(d4.title || 'bar4')} (bar4)</h3>
+      <form method="post" action="/set-item" onsubmit="return sendForm(event)">
+        <input type="hidden" name="dev" value="bar4" />
+
+        <div style="margin:6px 0;">
+          <label>Título:</label><br/>
+          <input name="title" style="width:320px;" value="${escapeHtml(st4.lastTitle || d4.title || 'Producto')}" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Precio:</label><br/>
+          <input name="price" style="width:120px;" value="${escapeHtml(String(st4.lastPrice || d4.unit_price || 100))}" />
+        </div>
+
+        <button type="submit">Guardar y regenerar QR</button>
+        <div class="muted" id="resp" style="margin-top:6px;"></div>
+      </form>
     </div>
+    ` : ''}
 
-    ${deviceConfigBoxes || '<div class="box"><div class="muted">No hay devices cargados todavía.</div></div>'}
+    ${d5 ? `
+    <div class="box">
+      <h3>Config ${escapeHtml(d5.title || 'bar5')} (bar5)</h3>
+      <form method="post" action="/set-item" onsubmit="return sendForm(event)">
+        <input type="hidden" name="dev" value="bar5" />
+
+        <div style="margin:6px 0;">
+          <label>Título:</label><br/>
+          <input name="title" style="width:320px;" value="${escapeHtml(st5.lastTitle || d5.title || 'Producto')}" />
+        </div>
+
+        <div style="margin:6px 0;">
+          <label>Precio:</label><br/>
+          <input name="price" style="width:120px;" value="${escapeHtml(String(st5.lastPrice || d5.unit_price || 100))}" />
+        </div>
+
+        <button type="submit">Guardar y regenerar QR</button>
+        <div class="muted" id="resp5" style="margin-top:6px;"></div>
+      </form>
+    </div>
+    ` : ''}
 
     <div class="box">
-      <div class="muted">Conectar vendedor (OAuth por cliente):</div>
+      <div class="muted">Conectar vendedor (devices OAuth habilitados):</div>
       <ul>
-        ${clientsEntries
-          .filter(([client_id]) => devicesEntries.some(([, d]) => d?.client_id === client_id && d?.enabled === true && d?.token_mode === 'oauth_seller'))
-          .map(([client_id, cfg]) => `<li><a href="/connect?client_id=${encodeURIComponent(client_id)}&key=${encodeURIComponent(ADMIN_KEY)}">/connect?client_id=${escapeHtml(client_id)}</a> <span class="muted">(${escapeHtml(String(cfg.display_name || ''))})</span></li>`)
-          .join('') || '<li class="muted">No hay clientes con devices oauth_seller habilitados.</li>'}
+        ${getAllowedDevs()
+          .filter(dev => getDevice(dev)?.token_mode === 'oauth_seller')
+          .map(dev => `<li><a href="/connect?dev=${encodeURIComponent(dev)}">/connect?dev=${escapeHtml(dev)}</a></li>`)
+          .join('')}
       </ul>
     </div>
 
-    <div class="grid">
-      <div class="box">
-        <h3>Crear cliente</h3>
-        <form onsubmit="return createClient(event)">
-          <div style="margin:6px 0;">
-            <label>Client ID:</label><br/>
-            <input name="client_id" style="width:220px;" placeholder="cliente02" />
-          </div>
+    <div class="box">
+      <h3>Crear device</h3>
+      <form onsubmit="return createDevice(event)">
+        <div style="margin:6px 0;">
+          <label>Dev:</label><br/>
+          <input name="dev" style="width:220px;" placeholder="bar6" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Nombre visible:</label><br/>
-            <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Cliente ID:</label><br/>
+          <input name="client_id" style="width:220px;" placeholder="cliente01" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Plan:</label><br/>
-            <select name="plan_type" style="width:220px;">
-              <option value="direct">direct</option>
-              <option value="marketplace_fee">marketplace_fee</option>
-              <option value="subscription">subscription</option>
-            </select>
-          </div>
+        <div style="margin:6px 0;">
+          <label>Título:</label><br/>
+          <input name="title" style="width:320px;" placeholder="Andes IPA" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Fee por defecto (ej 0.03):</label><br/>
-            <input name="default_fee_pct" style="width:120px;" value="0" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Precio:</label><br/>
+          <input name="unit_price" style="width:120px;" placeholder="3800" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Subscription status:</label><br/>
-            <select name="subscription_status" style="width:220px;">
-              <option value="active">active</option>
-              <option value="suspended">suspended</option>
-              <option value="expired">expired</option>
-            </select>
-          </div>
+        <div style="margin:6px 0;">
+          <label>Fee % (ej 0.03):</label><br/>
+          <input name="fee_pct" style="width:120px;" value="0" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Subscription until (YYYY-MM-DD):</label><br/>
-            <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Token mode:</label><br/>
+          <select name="token_mode" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="main_account">main_account</option>
+            <option value="oauth_seller">oauth_seller</option>
+          </select>
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Active:</label><br/>
-            <select name="active" style="width:220px;">
-              <option value="true">true</option>
-              <option value="false">false</option>
-            </select>
-          </div>
+        <div style="margin:6px 0;">
+          <label>Kind:</label><br/>
+          <input name="kind" style="width:220px;" value="beer_tap" />
+        </div>
 
-          <button type="submit">Crear cliente</button>
-          <div class="muted" id="createClientResp" style="margin-top:6px;"></div>
-        </form>
-      </div>
+        <button type="submit">Crear device</button>
+        <div class="muted" id="createResp" style="margin-top:6px;"></div>
+      </form>
+    </div>
 
-      <div class="box">
-        <h3>Editar cliente</h3>
-        <form onsubmit="return updateClient(event)">
-          <div style="margin:6px 0;">
-            <label>Client ID:</label><br/>
-            <input name="client_id" style="width:220px;" placeholder="cliente02" />
-          </div>
+    <div class="box">
+      <h3>Editar device</h3>
+      <form onsubmit="return updateDevice(event)">
+        <div style="margin:6px 0;">
+          <label>Dev:</label><br/>
+          <input name="dev" style="width:220px;" placeholder="bar6" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Nombre visible:</label><br/>
-            <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Cliente ID:</label><br/>
+          <input name="client_id" style="width:220px;" placeholder="cliente01" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Plan:</label><br/>
-            <select name="plan_type" style="width:220px;">
-              <option value="">(sin cambio)</option>
-              <option value="direct">direct</option>
-              <option value="marketplace_fee">marketplace_fee</option>
-              <option value="subscription">subscription</option>
-            </select>
-          </div>
+        <div style="margin:6px 0;">
+          <label>Título:</label><br/>
+          <input name="title" style="width:320px;" placeholder="Andes IPA" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Fee por defecto (ej 0.03):</label><br/>
-            <input name="default_fee_pct" style="width:120px;" placeholder="0.03" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Precio:</label><br/>
+          <input name="unit_price" style="width:120px;" placeholder="3800" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Subscription status:</label><br/>
-            <select name="subscription_status" style="width:220px;">
-              <option value="">(sin cambio)</option>
-              <option value="active">active</option>
-              <option value="suspended">suspended</option>
-              <option value="expired">expired</option>
-            </select>
-          </div>
+        <div style="margin:6px 0;">
+          <label>Fee % (ej 0.03):</label><br/>
+          <input name="fee_pct" style="width:120px;" placeholder="0" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Subscription until (YYYY-MM-DD):</label><br/>
-            <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Token mode:</label><br/>
+          <select name="token_mode" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="">(sin cambio)</option>
+            <option value="main_account">main_account</option>
+            <option value="oauth_seller">oauth_seller</option>
+          </select>
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Active:</label><br/>
-            <select name="active" style="width:220px;">
-              <option value="">(sin cambio)</option>
-              <option value="true">true</option>
-              <option value="false">false</option>
-            </select>
-          </div>
+        <div style="margin:6px 0;">
+          <label>Kind:</label><br/>
+          <input name="kind" style="width:220px;" placeholder="beer_tap" />
+        </div>
 
-          <button type="submit">Actualizar cliente</button>
-          <div class="muted" id="updateClientResp" style="margin-top:6px;"></div>
-        </form>
-      </div>
+        <div style="margin:6px 0;">
+          <label>Enabled:</label><br/>
+          <select name="enabled" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="">(sin cambio)</option>
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
 
-      <div class="box">
-        <h3>Crear device</h3>
-        <form onsubmit="return createDevice(event)">
-          <div style="margin:6px 0;">
-            <label>Dev:</label><br/>
-            <input name="dev" style="width:220px;" placeholder="canilla01" />
-          </div>
+        <button type="submit">Actualizar device</button>
+        <div class="muted" id="updateResp" style="margin-top:6px;"></div>
+      </form>
+    </div>
 
-          <div style="margin:6px 0;">
-            <label>Cliente ID:</label><br/>
-            <input name="client_id" style="width:220px;" placeholder="cliente01" />
-          </div>
+    <div class="box">
+      <h3>Devices actuales</h3>
+      <table>
+        <tr>
+          <th>Dev</th>
+          <th>Cliente</th>
+          <th>Título</th>
+          <th>Precio</th>
+          <th>Fee</th>
+          <th>Token</th>
+          <th>Enabled</th>
+          <th>Kind</th>
+          <th>OAuth</th>
+        </tr>
+        ${getAllowedDevs().map(dev => {
+          const d = getDevice(dev) || {};
+          const oauthConnected = !!tokensByDev[dev]?.access_token;
+          return `
+            <tr>
+              <td>${escapeHtml(dev)}</td>
+              <td>${escapeHtml(String(d.client_id || ''))}</td>
+              <td>${escapeHtml(String(d.title || ''))}</td>
+              <td>${escapeHtml(String(d.unit_price || ''))}</td>
+              <td>${escapeHtml(String(d.fee_pct || 0))}</td>
+              <td>${escapeHtml(String(d.token_mode || ''))}</td>
+              <td>${escapeHtml(String(d.enabled))}</td>
+              <td>${escapeHtml(String(d.kind || ''))}</td>
+              <td>${oauthConnected ? 'sí' : 'no'}</td>
+            </tr>
+          `;
+        }).join('')}
+      </table>
+    </div>
 
-          <div style="margin:6px 0;">
-            <label>Título:</label><br/>
-            <input name="title" style="width:320px;" placeholder="QdRink" />
-          </div>
+    <div class="box">
+      <h3>Crear cliente</h3>
+      <form onsubmit="return createClient(event)">
+        <div style="margin:6px 0;">
+          <label>Client ID:</label><br/>
+          <input name="client_id" style="width:220px;" placeholder="cliente02" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Precio:</label><br/>
-            <input name="unit_price" style="width:120px;" placeholder="3800" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Nombre visible:</label><br/>
+          <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Fee % (ej 0.03):</label><br/>
-            <input name="fee_pct" style="width:120px;" value="0" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Plan:</label><br/>
+          <select name="plan_type" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="direct">direct</option>
+            <option value="marketplace_fee">marketplace_fee</option>
+            <option value="subscription">subscription</option>
+          </select>
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Token mode:</label><br/>
-            <select name="token_mode" style="width:220px;">
-              <option value="main_account">main_account</option>
-              <option value="oauth_seller">oauth_seller</option>
-            </select>
-          </div>
+        <div style="margin:6px 0;">
+          <label>Fee por defecto (ej 0.03):</label><br/>
+          <input name="default_fee_pct" style="width:120px;" value="0" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Kind:</label><br/>
-            <input name="kind" style="width:220px;" value="beer_tap" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Subscription status:</label><br/>
+          <select name="subscription_status" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="active">active</option>
+            <option value="suspended">suspended</option>
+            <option value="expired">expired</option>
+          </select>
+        </div>
 
-          <button type="submit">Crear device</button>
-          <div class="muted" id="createResp" style="margin-top:6px;"></div>
-        </form>
-      </div>
+        <div style="margin:6px 0;">
+          <label>Subscription until (YYYY-MM-DD):</label><br/>
+          <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
+        </div>
 
-      <div class="box">
-        <h3>Editar device</h3>
-        <form onsubmit="return updateDevice(event)">
-          <div style="margin:6px 0;">
-            <label>Dev:</label><br/>
-            <input name="dev" style="width:220px;" placeholder="canilla01" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Active:</label><br/>
+          <select name="active" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Cliente ID:</label><br/>
-            <input name="client_id" style="width:220px;" placeholder="cliente01" />
-          </div>
+        <button type="submit">Crear cliente</button>
+        <div class="muted" id="createClientResp" style="margin-top:6px;"></div>
+      </form>
+    </div>
 
-          <div style="margin:6px 0;">
-            <label>Título:</label><br/>
-            <input name="title" style="width:320px;" placeholder="QdRink" />
-          </div>
+    <div class="box">
+      <h3>Editar cliente</h3>
+      <form onsubmit="return updateClient(event)">
+        <div style="margin:6px 0;">
+          <label>Client ID:</label><br/>
+          <input name="client_id" style="width:220px;" placeholder="cliente02" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Precio:</label><br/>
-            <input name="unit_price" style="width:120px;" placeholder="3800" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Nombre visible:</label><br/>
+          <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Fee % (ej 0.03):</label><br/>
-            <input name="fee_pct" style="width:120px;" placeholder="0" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Plan:</label><br/>
+          <select name="plan_type" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="">(sin cambio)</option>
+            <option value="direct">direct</option>
+            <option value="marketplace_fee">marketplace_fee</option>
+            <option value="subscription">subscription</option>
+          </select>
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Token mode:</label><br/>
-            <select name="token_mode" style="width:220px;">
-              <option value="">(sin cambio)</option>
-              <option value="main_account">main_account</option>
-              <option value="oauth_seller">oauth_seller</option>
-            </select>
-          </div>
+        <div style="margin:6px 0;">
+          <label>Fee por defecto (ej 0.03):</label><br/>
+          <input name="default_fee_pct" style="width:120px;" placeholder="0.03" />
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Kind:</label><br/>
-            <input name="kind" style="width:220px;" placeholder="beer_tap" />
-          </div>
+        <div style="margin:6px 0;">
+          <label>Subscription status:</label><br/>
+          <select name="subscription_status" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="">(sin cambio)</option>
+            <option value="active">active</option>
+            <option value="suspended">suspended</option>
+            <option value="expired">expired</option>
+          </select>
+        </div>
 
-          <div style="margin:6px 0;">
-            <label>Enabled:</label><br/>
-            <select name="enabled" style="width:220px;">
-              <option value="">(sin cambio)</option>
-              <option value="true">true</option>
-              <option value="false">false</option>
-            </select>
-          </div>
+        <div style="margin:6px 0;">
+          <label>Subscription until (YYYY-MM-DD):</label><br/>
+          <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
+        </div>
 
-          <button type="submit">Actualizar device</button>
-          <div class="muted" id="updateResp" style="margin-top:6px;"></div>
-        </form>
-      </div>
+        <div style="margin:6px 0;">
+          <label>Active:</label><br/>
+          <select name="active" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
+            <option value="">(sin cambio)</option>
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
+
+        <button type="submit">Actualizar cliente</button>
+        <div class="muted" id="updateClientResp" style="margin-top:6px;"></div>
+      </form>
     </div>
 
     <div class="box">
       <h3>Registrar equipo virgen</h3>
-      <div class="muted">Este es el mismo flujo del ESP nuevo/reset: entra a QdRink_Setup_XXXXX, el usuario pone su client_id, el nombre del device y la clave del AP local.</div>
       <form onsubmit="return registerDevice(event)">
         <div style="margin:6px 0;">
           <label>Client ID:</label><br/>
@@ -1839,7 +1713,7 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         <div style="margin:6px 0;">
           <label>Kind:</label><br/>
-          <select name="kind" style="width:220px;">
+          <select name="kind" style="width:220px; padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee;">
             <option value="beer_tap">beer_tap</option>
             <option value="ticket">ticket</option>
           </select>
@@ -1848,50 +1722,6 @@ app.get('/panel', requireAdmin, (req, res) => {
         <button type="submit">Registrar equipo</button>
         <div class="muted" id="registerDeviceResp" style="margin-top:6px;"></div>
       </form>
-    </div>
-
-    <div class="box">
-      <h3>Clients actuales</h3>
-      <table>
-        <tr>
-          <th>Client ID</th>
-          <th>Nombre</th>
-          <th>Plan</th>
-          <th>Fee default</th>
-          <th>Status</th>
-          <th>Hasta</th>
-          <th>Activo</th>
-          <th>Devices</th>
-          <th>OAuth</th>
-          <th>user_id MP</th>
-          <th>OAuth updated</th>
-          <th>Conectar</th>
-          <th>Acción</th>
-        </tr>
-        ${clientsTableRows || '<tr><td colspan="13" class="muted">No hay clients cargados.</td></tr>'}
-      </table>
-      <div class="muted" id="deleteClientResp" style="margin-top:6px;"></div>
-    </div>
-
-    <div class="box">
-      <h3>Devices actuales</h3>
-      <table>
-        <tr>
-          <th>Dev</th>
-          <th>Cliente</th>
-          <th>Título</th>
-          <th>Precio base</th>
-          <th>Último precio</th>
-          <th>Fee</th>
-          <th>Token</th>
-          <th>Enabled</th>
-          <th>Kind</th>
-          <th>OAuth cliente</th>
-          <th>Acción</th>
-        </tr>
-        ${devicesTableRows || '<tr><td colspan="11" class="muted">No hay devices cargados.</td></tr>'}
-      </table>
-      <div class="muted" id="deleteDeviceResp" style="margin-top:6px;"></div>
     </div>
 
     <table>
@@ -1909,13 +1739,7 @@ app.get('/panel', requireAdmin, (req, res) => {
       </tr>
   `;
 
-  const pagosUnicos = Array.from(
-    new Map(
-      pagos.map((p) => [String(p.payment_id || ''), p])
-    ).values()
-  );
-
-  pagosUnicos.slice().reverse().forEach((p) => {
+  pagos.slice().reverse().forEach((p) => {
     html += `
       <tr>
         <td>${escapeHtml(String(p.fechaHora || ''))}</td>
@@ -1941,13 +1765,12 @@ app.get('/panel', requireAdmin, (req, res) => {
       async function sendForm(ev) {
         ev.preventDefault();
 
-        const form = ev.target;
-        const fd = new FormData(form);
-        const outId = form.getAttribute('data-out');
+        const fd = new FormData(ev.target);
+        const dev = fd.get('dev');
 
         const body = {
-          dev: String(fd.get('dev') || '').trim(),
-          title: String(fd.get('title') || '').trim(),
+          dev,
+          title: fd.get('title'),
           price: Number(fd.get('price'))
         };
 
@@ -1961,7 +1784,9 @@ app.get('/panel', requireAdmin, (req, res) => {
         });
 
         const j = await r.json();
-        if (outId) document.getElementById(outId).textContent = JSON.stringify(j);
+
+        const outId = (dev === 'bar5') ? 'resp5' : 'resp';
+        document.getElementById(outId).textContent = JSON.stringify(j);
 
         return false;
       }
@@ -1995,7 +1820,7 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         const j = await r.json();
         document.getElementById('createResp').textContent =
-          j.ok ? ('OK: ' + j.dev + ' creado. Recargá el panel.') : JSON.stringify(j);
+          j.ok ? ('OK: ' + j.dev + ' creado') : JSON.stringify(j);
 
         return false;
       }
@@ -2037,148 +1862,112 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         const j = await r.json();
         document.getElementById('updateResp').textContent =
-          j.ok ? ('OK: ' + j.dev + ' actualizado. Recargá el panel.') : JSON.stringify(j);
+          j.ok ? ('OK: ' + j.dev + ' actualizado') : JSON.stringify(j);
 
         return false;
       }
 
-      async function deleteDevice(dev) {
-        if (!confirm('Eliminar device ' + dev + '?')) return false;
+     async function createClient(ev) {
+       ev.preventDefault();
 
-        const r = await fetch('/admin/device/delete', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-key': ADMIN_KEY
-          },
-          body: JSON.stringify({ dev })
-        });
+       const fd = new FormData(ev.target);
 
-        const j = await r.json();
-        document.getElementById('deleteDeviceResp').textContent =
-          j.ok ? ('OK: ' + j.dev + ' eliminado. Recargá el panel.') : JSON.stringify(j);
+       const subscriptionUntil = String(fd.get('subscription_until') || '').trim();
+       const activeRaw = String(fd.get('active') || 'true').trim();
+     
+       const body = {
+         client_id: String(fd.get('client_id') || '').trim(),
+         display_name: String(fd.get('display_name') || '').trim(),
+         plan_type: String(fd.get('plan_type') || '').trim(),
+         default_fee_pct: Number(fd.get('default_fee_pct') || 0),
+         subscription_status: String(fd.get('subscription_status') || '').trim(),
+         subscription_until: subscriptionUntil || null,
+         active: activeRaw === 'true'
+       };
 
-        return false;
-      }
+       const r = await fetch('/admin/client/create', {
+         method: 'POST',
+         headers: {
+           'Content-Type': 'application/json',
+           'x-admin-key': ADMIN_KEY
+         },
+         body: JSON.stringify(body)
+       });
 
-      async function createClient(ev) {
-        ev.preventDefault();
+       const j = await r.json();
+       document.getElementById('createClientResp').textContent =
+         j.ok ? ('OK: ' + j.client_id + ' creado') : JSON.stringify(j);
+     
+       return false;
+     }
 
-        const fd = new FormData(ev.target);
-        const subscriptionUntil = String(fd.get('subscription_until') || '').trim();
-        const activeRaw = String(fd.get('active') || 'true').trim();
+    async function updateClient(ev) {
+      ev.preventDefault();
 
-        const body = {
-          client_id: String(fd.get('client_id') || '').trim(),
-          display_name: String(fd.get('display_name') || '').trim(),
-          plan_type: String(fd.get('plan_type') || '').trim(),
-          default_fee_pct: Number(fd.get('default_fee_pct') || 0),
-          subscription_status: String(fd.get('subscription_status') || '').trim(),
-          subscription_until: subscriptionUntil || null,
-          active: activeRaw === 'true'
-        };
+      const fd = new FormData(ev.target);
 
-        const r = await fetch('/admin/client/create', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-key': ADMIN_KEY
-          },
-          body: JSON.stringify(body)
-        });
+      const body = {
+        client_id: String(fd.get('client_id') || '').trim()
+      };
 
-        const j = await r.json();
-        document.getElementById('createClientResp').textContent =
-          j.ok ? ('OK: ' + j.client_id + ' creado. Recargá el panel.') : JSON.stringify(j);
+      const display_name = String(fd.get('display_name') || '').trim();
+      const plan_type = String(fd.get('plan_type') || '').trim();
+      const default_fee_pct_raw = String(fd.get('default_fee_pct') || '').trim();
+      const subscription_status = String(fd.get('subscription_status') || '').trim();
+      const subscription_until_raw = String(fd.get('subscription_until') || '').trim();
+      const active_raw = String(fd.get('active') || '').trim();
 
-        return false;
-      }
+      if (display_name) body.display_name = display_name;
+      if (plan_type) body.plan_type = plan_type;
+      if (default_fee_pct_raw) body.default_fee_pct = Number(default_fee_pct_raw);
+      if (subscription_status) body.subscription_status = subscription_status;
+      if (subscription_until_raw) body.subscription_until = subscription_until_raw;
+      if (active_raw === 'true') body.active = true;
+      if (active_raw === 'false') body.active = false;
 
-      async function updateClient(ev) {
-        ev.preventDefault();
+      const r = await fetch('/admin/client/update', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-key': ADMIN_KEY
+        },
+        body: JSON.stringify(body)
+      });
 
-        const fd = new FormData(ev.target);
+      const j = await r.json();
+      document.getElementById('updateClientResp').textContent =
+        j.ok ? ('OK: ' + j.client_id + ' actualizado') : JSON.stringify(j);
 
-        const body = {
-          client_id: String(fd.get('client_id') || '').trim()
-        };
+      return false;
+    }
+     
+    async function registerDevice(ev) {
+      ev.preventDefault();
 
-        const display_name = String(fd.get('display_name') || '').trim();
-        const plan_type = String(fd.get('plan_type') || '').trim();
-        const default_fee_pct_raw = String(fd.get('default_fee_pct') || '').trim();
-        const subscription_status = String(fd.get('subscription_status') || '').trim();
-        const subscription_until_raw = String(fd.get('subscription_until') || '').trim();
-        const active_raw = String(fd.get('active') || '').trim();
+      const fd = new FormData(ev.target);
 
-        if (display_name) body.display_name = display_name;
-        if (plan_type) body.plan_type = plan_type;
-        if (default_fee_pct_raw) body.default_fee_pct = Number(default_fee_pct_raw);
-        if (subscription_status) body.subscription_status = subscription_status;
-        if (subscription_until_raw) body.subscription_until = subscription_until_raw;
-        if (active_raw === 'true') body.active = true;
-        if (active_raw === 'false') body.active = false;
+      const body = {
+        client_id: String(fd.get('client_id') || '').trim(),
+        dev: String(fd.get('dev') || '').trim(),
+        ap_password: String(fd.get('ap_password') || '').trim(),
+        kind: String(fd.get('kind') || 'beer_tap').trim()
+      };
 
-        const r = await fetch('/admin/client/update', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-key': ADMIN_KEY
-          },
-          body: JSON.stringify(body)
-        });
+      const r = await fetch('/device/register', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+      });
 
-        const j = await r.json();
-        document.getElementById('updateClientResp').textContent =
-          j.ok ? ('OK: ' + j.client_id + ' actualizado. Recargá el panel.') : JSON.stringify(j);
+      const j = await r.json();
+      document.getElementById('registerDeviceResp').textContent =
+        j.ok ? ('OK: ' + j.dev + ' registrado') : JSON.stringify(j);
 
-        return false;
-      }
+      return false;
+    }
 
-      async function deleteClient(client_id) {
-        if (!confirm('Eliminar client ' + client_id + '?')) return false;
-
-        const r = await fetch('/admin/client/delete', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-key': ADMIN_KEY
-          },
-          body: JSON.stringify({ client_id })
-        });
-
-        const j = await r.json();
-        document.getElementById('deleteClientResp').textContent =
-          j.ok ? ('OK: ' + j.client_id + ' eliminado. Recargá el panel.') : JSON.stringify(j);
-
-        return false;
-      }
-
-      async function registerDevice(ev) {
-        ev.preventDefault();
-
-        const fd = new FormData(ev.target);
-
-        const body = {
-          client_id: String(fd.get('client_id') || '').trim(),
-          dev: String(fd.get('dev') || '').trim(),
-          ap_password: String(fd.get('ap_password') || '').trim(),
-          kind: String(fd.get('kind') || 'beer_tap').trim()
-        };
-
-        const r = await fetch('/device/register', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(body)
-        });
-
-        const j = await r.json();
-        document.getElementById('registerDeviceResp').textContent =
-          j.ok ? ('OK: ' + j.dev + ' registrado') : JSON.stringify(j);
-
-        return false;
-      }
     </script>
   </body>
   </html>
@@ -2186,7 +1975,6 @@ app.get('/panel', requireAdmin, (req, res) => {
 
   res.send(html);
 });
-
 
 // ================== IPN / WEBHOOK ==================
 
@@ -2197,8 +1985,6 @@ async function fetchPaymentWithToken(paymentId, token) {
 }
 
 app.post('/ipn', async (req, res) => {
-  let pid = '';
-
   try {
     console.log('📥 IPN recibida:', { query: req.query, body: req.body });
 
@@ -2220,31 +2006,27 @@ app.post('/ipn', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    pid = String(paymentId);
-
-    if (processedPayments.has(pid) || processingPayments.has(pid)) {
-      console.log('ℹ️ Pago ya procesado o en proceso, ignoro:', pid);
+    if (processedPayments.has(String(paymentId))) {
+      console.log('ℹ️ Pago ya procesado, ignoro:', paymentId);
       return res.sendStatus(200);
     }
-
-    processingPayments.add(pid);
 
     // 1) intentar con tu token
     let mpRes;
     try {
-      mpRes = await fetchPaymentWithToken(pid, ACCESS_TOKEN);
+      mpRes = await fetchPaymentWithToken(paymentId, ACCESS_TOKEN);
     } catch (e) {
       // 2) fallback: intentar con tokens de vendedores guardados
       console.log('ℹ️ No pude leer pago con token marketplace, pruebo tokens vendedores...');
-      const clientIds = Object.keys(tokensByClient);
+      const devs = Object.keys(tokensByDev);
       let lastErr = e;
 
-      for (const client_id of clientIds) {
-        const tok = await getAccessTokenForClient(client_id);
+      for (const dev of devs) {
+        const tok = await getAccessTokenForDev(dev);
         if (!tok) continue;
         try {
-          mpRes = await fetchPaymentWithToken(pid, tok);
-          console.log(`✅ Leí el pago con token del client_id=${client_id}`);
+          mpRes = await fetchPaymentWithToken(paymentId, tok);
+          console.log(`✅ Leí el pago con token del dev=${dev}`);
           lastErr = null;
           break;
         } catch (ee) {
@@ -2269,22 +2051,14 @@ app.post('/ipn', async (req, res) => {
     const externalRef = data.external_reference || null;
     const preference_id = data.preference_id || null;
 
-    console.log('📩 Pago recibido:', {
-      estado,
-      status_detail,
-      email,
-      monto,
-      metodo,
-      externalRef,
-      preference_id
-    });
+    console.log('📩 Pago recibido:', { estado, status_detail, email, monto, metodo, externalRef, preference_id });
 
     const dev = (externalRef ? String(externalRef).split(':')[0] : '').toLowerCase();
     const devValido = isDeviceEnabled(dev);
 
     if (estado !== 'approved') {
       console.log(`⚠️ Pago NO aprobado (${estado}). detalle:`, status_detail);
-      processedPayments.add(pid);
+      processedPayments.add(String(paymentId));
       return res.sendStatus(200);
     }
 
@@ -2293,54 +2067,51 @@ app.post('/ipn', async (req, res) => {
     const okPref = !!(st && preference_id && preference_id === st.ultimaPreferencia);
 
     if (devValido && (okExt || okPref)) {
-      const fechaHora = nowAR();
+    const fechaHora = nowAR();
 
-      st.paidEvent = {
-        payment_id: pid,
-        at: Date.now(),
-        fechaHora,
-        monto,
-        metodo,
-        email,
-        extRef: externalRef,
-        title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
-        price: stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100
-      };
+    st.paidEvent = {
+      payment_id: String(paymentId),
+      at: Date.now(),
+      fechaHora, // ✅ para imprimir en el ticket sin RTC
+      monto,
+      metodo,
+      email,
+      extRef: externalRef,
+      title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
+      price: stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100
+    };
 
-      saveState(stateByDev);
+    saveState(stateByDev);
+    processedPayments.add(String(paymentId));
 
-      console.log(`✅ Pago confirmado y válido para ${dev} (guardado hasta ACK)`);
+    console.log(`✅ Pago confirmado y válido para ${dev} (guardado hasta ACK)`);
 
-      const registro = {
-        fechaHora,
-        dev,
-        email,
-        estado,
-        monto,
-        metodo,
-        descripcion,
-        payment_id: pid,
-        preference_id,
-        external_reference: externalRef,
-        title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
-      };
-
-      if (!pagos.some((p) => String(p.payment_id || '') === pid)) {
-        pagos.push(registro);
-      } else {
-        console.log('ℹ️ Registro ya existente en tabla, no duplico:', pid);
-      }
+    // y acá seguís igual con el registro para la tabla:
+    const registro = {
+      fechaHora,
+      dev,
+      email,
+      estado,
+      monto,
+      metodo,
+      descripcion,
+      payment_id: String(paymentId),
+      preference_id,
+      external_reference: externalRef,
+      title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
+    };
+    pagos.push(registro);
 
       const logMsg =
-        `🕒 ${fechaHora} | Dev: ${dev}` +
-        ` | Producto: ${(stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto')}` +
-        ` | Monto: ${monto}` +
-        ` | Pago de: ${email}` +
-        ` | Estado: ${estado}` +
-        ` | extRef: ${externalRef}` +
-        ` | pref: ${preference_id}` +
-        ` | id: ${pid}` +
-        ` | price: ${stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100}\n`;
+       `🕒 ${fechaHora} | Dev: ${dev}` +
+       ` | Producto: ${(stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto')}` +
+       ` | Monto: ${monto}` +
+       ` | Pago de: ${email}` +
+       ` | Estado: ${estado}` +
+       ` | extRef: ${externalRef}` +
+       ` | pref: ${preference_id}` +
+       ` | id: ${paymentId}` +
+       ` | price: ${stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100}\n`;
 
       fs.appendFileSync(PAYLOG_PATH, logMsg);
 
@@ -2351,29 +2122,23 @@ app.post('/ipn', async (req, res) => {
           st.rotateScheduled = false;
         }, ROTATE_DELAY_MS);
       }
+    } else {
+      console.log('⚠️ Pago aprobado pero NO corresponde al QR vigente (o dev inválido). Ignorado.');
+      console.log('🧪 DEBUG mismatch:', {
+        dev,
+        externalRef,
+        expectedExtRef: stateByDev[dev]?.expectedExtRef,
+        preference_id,
+        ultimaPreferencia: stateByDev[dev]?.ultimaPreferencia,
+      });
 
-      processedPayments.add(pid);
-      return res.sendStatus(200);
+      processedPayments.add(String(paymentId));
     }
 
-    console.log('⚠️ Pago aprobado pero NO corresponde al QR vigente (o dev inválido). Ignorado.');
-    console.log('🧪 DEBUG mismatch:', {
-      dev,
-      externalRef,
-      expectedExtRef: stateByDev[dev]?.expectedExtRef,
-      preference_id,
-      ultimaPreferencia: stateByDev[dev]?.ultimaPreferencia,
-    });
-
-    processedPayments.add(pid);
-    return res.sendStatus(200);
+    res.sendStatus(200);
   } catch (error) {
     console.error('❌ Error en /ipn:', error.response?.data || error.message);
-    return res.sendStatus(200);
-  } finally {
-    if (pid) {
-      processingPayments.delete(pid);
-    }
+    res.sendStatus(200);
   }
 });
 
@@ -2396,9 +2161,8 @@ app.listen(PORT, () => {
     }
 
     if (tokenMode === 'oauth_seller') {
-      const client_id = String(cfg.client_id || '').trim();
-      if (!tokensByClient[client_id]?.access_token) {
-        console.log(`ℹ️ ${dev} sin OAuth de cliente: no genero link inicial.`);
+      if (!tokensByDev[dev]?.access_token) {
+        console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
         return;
       }
       recargarLinkConReintento(dev);
