@@ -684,7 +684,7 @@ app.post('/ipn', async (req, res) => {
 
 // ================== ARRANQUE ==================
 
-pp.listen(PORT, () => {
+App.listen(PORT, () => {
   console.log(`Servidor activo en http://localhost:${PORT}`);
   console.log('Generando links iniciales por dev...');
 
