@@ -1,6 +1,6 @@
 // index.js – QdRink multi-BAR + OAuth Marketplace (PRODUCCION)
-// - OAuth connect por dev (bar4, bar5)
-// - Usa token del vendedor para crear preferencias 
+// - OAuth connect por dev (bar2, bar3...)
+// - Usa token del vendedor para crear preferencias
 // - marketplace_fee para comisión
 // - IPN intenta leer payment con token correcto (fallback)
 // - refresh automático con refresh_token (offline_access)
@@ -21,30 +21,18 @@ app.use(bodyParser.json());
 
 // ================== CONFIG ==================
 
-const ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
-const MP_CLIENT_ID = process.env.MP_CLIENT_ID;
-const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET;
-const MP_REDIRECT_URI = process.env.MP_REDIRECT_URI;
+const ACCESS_TOKEN =
+  process.env.MP_ACCESS_TOKEN ||
+  'APP_USR-6603583526397159-042819-b68923f859e89b4ddb8e28a65eb8a76d-153083685'; // tu token (marketplace) para bar1 o fallback
+
+const MP_CLIENT_ID = process.env.MP_CLIENT_ID || '6603583526397159';
+const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || 'dRhqUDhkCgga5869pGjhKeNUVtuJD8cI';
+const MP_REDIRECT_URI =
+  process.env.MP_REDIRECT_URI || 'https://mp-server-c1mg.onrender.com/oauth/callback';
 
 const ROTATE_DELAY_MS = Number(process.env.ROTATE_DELAY_MS || 5000);
-const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const ADMIN_KEY = process.env.ADMIN_KEY;
-
-const REQUIRED_ENVS = [
-  'MP_ACCESS_TOKEN',
-  'MP_CLIENT_ID',
-  'MP_CLIENT_SECRET',
-  'MP_REDIRECT_URI',
-  'WEBHOOK_URL',
-  'ADMIN_KEY',
-];
-
-for (const name of REQUIRED_ENVS) {
-  if (!process.env[name]) {
-    console.error(`❌ Falta variable de entorno obligatoria: ${name}`);
-    process.exit(1);
-  }
-}
+const WEBHOOK_URL =
+  process.env.WEBHOOK_URL || 'https://mp-server-c1mg.onrender.com/ipn';
 
 // ✅ Render Disk mount
 const DATA_DIR = process.env.DATA_DIR || '/var/data';
@@ -53,35 +41,25 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 console.log('📦 DATA_DIR:', DATA_DIR);
 
 // Comisión por DEV (porcentaje + piso mínimo)
+const MARKETPLACE_FEE_PERCENT_BY_DEV = {
+  bar1: 0,     // bar1 cobra a tu cuenta → sin comisión
+  bar2: 0,  // 10%
+  bar3: 0,
+};
 
-const MARKETPLACE_FEE_MIN = 100; // piso mínimo en pesos
+const MARKETPLACE_FEE_MIN = 10; // piso mínimo en pesos
 
-// ================== middleware ==================
+const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3'];
 
-function requireAdmin(req, res, next) {
-  const provided =
-    req.query.key ||
-    req.headers['x-admin-key'] ||
-    req.body?.admin_key;
+const ITEM_BY_DEV = {
+  bar1: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 100 },
+  bar2: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 110 },
+  bar3: { title: 'Stella Artois',  quantity: 1, currency_id: 'ARS', unit_price: 120 },
+};
 
-  if (!ADMIN_KEY) {
-    return res.status(500).send('ADMIN_KEY no configurada');
-  }
-
-  if (provided !== ADMIN_KEY) {
-    return res.status(401).send('No autorizado');
-  }
-
-  next();
-}
-
-// ================== TOKENS / STATE / DEVICES STORE ==================
+// ================== TOKENS STORE (por dev) ==================
 
 const TOKENS_PATH = path.join(DATA_DIR, 'tokens.json');
-const STATE_PATH = path.join(DATA_DIR, 'stateByDev.json');
-const PAYLOG_PATH = path.join(DATA_DIR, 'pagos.log');
-const DEVICES_PATH = path.join(DATA_DIR, 'devices.json');
-const CLIENTS_PATH = path.join(DATA_DIR, 'clients.json');
 
 function loadTokens() {
   try {
@@ -101,6 +79,18 @@ function saveTokens(obj) {
   }
 }
 
+// Estructura esperada:
+// tokensByDev[dev] = {
+//   access_token, refresh_token, token_type, expires_in, expires_at, user_id
+// }
+let tokensByDev = loadTokens();
+console.log('🔑 tokens.json existe?', fs.existsSync(TOKENS_PATH));
+console.log('🔑 tokens cargados:', Object.keys(tokensByDev));
+
+// ================== STATE STORE (por dev) ==================
+
+const STATE_PATH = path.join(DATA_DIR, 'stateByDev.json');
+
 function loadState() {
   try {
     if (!fs.existsSync(STATE_PATH)) return {};
@@ -119,301 +109,33 @@ function saveState(obj) {
   }
 }
 
-function pruneStateByDevices(stateObj) {
-  const allowed = new Set(getAllowedDevs());
-  const cleaned = {};
-
-  for (const [dev, value] of Object.entries(stateObj || {})) {
-    if (allowed.has(dev)) cleaned[dev] = value;
-  }
-
-  return cleaned;
-}
-
-function loadDevices() {
-  const seed = {
-    devices: {}
-  };
-
-  try {
-    if (!fs.existsSync(DEVICES_PATH)) {
-      fs.writeFileSync(DEVICES_PATH, JSON.stringify(seed, null, 2));
-      return seed;
-    }
-
-    const raw = fs.readFileSync(DEVICES_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-
-    if (!parsed || typeof parsed !== 'object') {
-      throw new Error('devices.json inválido');
-    }
-
-    if (!parsed.devices || typeof parsed.devices !== 'object') {
-      parsed.devices = {};
-    }
-
-    if (Object.keys(parsed.devices).length === 0) {
-      fs.writeFileSync(DEVICES_PATH, JSON.stringify(seed, null, 2));
-      return seed;
-    }
-
-    return parsed;
-  } catch (e) {
-    console.error('❌ Error cargando devices.json:', e.message);
-    return seed;
-  }
-}
-
-function saveDevices(devicesData) {
-  try {
-    fs.writeFileSync(DEVICES_PATH, JSON.stringify(devicesData, null, 2));
-  } catch (e) {
-    console.error('❌ No pude guardar devices.json:', e.message);
-  }
-}
-
-// tokensByClient[client_id] = { access_token, refresh_token, expires_at, user_id, ... }
-let tokensByClient = loadTokens();
-let devicesData = loadDevices();
-let clientsData = loadClients();
-
-ensureDeviceKeys();
-
-console.log('🔑 tokens.json existe?', fs.existsSync(TOKENS_PATH));
-console.log('🔑 tokens cargados por cliente:', Object.keys(tokensByClient));
-console.log('🧩 devices.json existe?', fs.existsSync(DEVICES_PATH));
-console.log('🧩 devices cargados:', Object.keys(devicesData.devices || {}));
-console.log('👤 clients.json existe?', fs.existsSync(CLIENTS_PATH));
-console.log('👤 clients cargados:', Object.keys(clientsData.clients || {}));
-
-function getDevices() {
-  return devicesData.devices || {};
-}
-
-function getDevice(dev) {
-  const devices = getDevices();
-  return devices[String(dev || '').toLowerCase()] || null;
-}
-
-function isDeviceEnabled(dev) {
-  const d = getDevice(dev);
-  return !!(d && d.enabled === true);
-}
-
-function getAllowedDevs() {
-  return Object.entries(getDevices())
-    .filter(([, cfg]) => cfg && cfg.enabled === true)
-    .map(([dev]) => dev);
-}
-
-function getDeviceItem(dev) {
-  const d = getDevice(dev);
-  if (!d) return null;
-
-  return {
-    title: String(d.title || 'Producto'),
-    quantity: Number(d.quantity || 1),
-    currency_id: String(d.currency_id || 'ARS'),
-    unit_price: Number(d.unit_price || 100),
-  };
-}
-
-function ensureDeviceKeys() {
-  let changed = false;
-
-  for (const [dev, cfg] of Object.entries(getDevices())) {
-    if (!cfg.device_key || String(cfg.device_key).trim().length < 8) {
-      cfg.device_key =
-        'dk_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
-      changed = true;
-      console.log(`🔐 device_key generada para ${dev}`);
-    }
-  }
-
-  if (changed) {
-    saveDevices(devicesData);
-  }
-}
-
-function loadClients() {
-  const seed = {
-    clients: {}
-  };
-
-  try {
-    if (!fs.existsSync(CLIENTS_PATH)) {
-      fs.writeFileSync(CLIENTS_PATH, JSON.stringify(seed, null, 2));
-      return seed;
-    }
-
-    const raw = fs.readFileSync(CLIENTS_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-
-    if (!parsed || typeof parsed !== 'object') {
-      throw new Error('clients.json inválido');
-    }
-
-    if (!parsed.clients || typeof parsed.clients !== 'object') {
-      parsed.clients = {};
-    }
-
-    if (Object.keys(parsed.clients).length === 0) {
-      fs.writeFileSync(CLIENTS_PATH, JSON.stringify(seed, null, 2));
-      return seed;
-    }
-
-    return parsed;
-  } catch (e) {
-    console.error('❌ Error cargando clients.json:', e.message);
-    return seed;
-  }
-}
-
-function getClients() {
-  return clientsData.clients || {};
-}
-
-function getClient(clientId) {
-  const clients = getClients();
-  return clients[String(clientId || '').trim()] || null;
-}
-
-function normalizeTokensToClients() {
-  let changed = false;
-  const normalized = {};
-
-  for (const [key, tok] of Object.entries(tokensByClient || {})) {
-    if (!tok || typeof tok !== 'object' || !tok.access_token) continue;
-
-    const keyStr = String(key || '').trim();
-    const client = getClient(keyStr);
-
-    if (client) {
-      normalized[keyStr] = tok;
-      continue;
-    }
-
-    const device = getDevice(keyStr);
-    const legacyClientId = String(device?.client_id || '').trim();
-
-    if (legacyClientId) {
-      if (!normalized[legacyClientId]) {
-        normalized[legacyClientId] = tok;
-      }
-      changed = true;
-      console.log(`🔁 Migré token legacy dev=${keyStr} -> client_id=${legacyClientId}`);
-      continue;
-    }
-
-    normalized[keyStr] = tok;
-  }
-
-  if (changed) {
-    tokensByClient = normalized;
-    saveTokens(tokensByClient);
-  }
-}
-
-normalizeTokensToClients();
-
-function isDateExpired(dateStr) {
-  if (!dateStr) return false;
-
-  const s = String(dateStr).trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
-
-  const today = new Date();
-  const yyyy = today.getFullYear();
-  const mm = String(today.getMonth() + 1).padStart(2, '0');
-  const dd = String(today.getDate()).padStart(2, '0');
-  const todayStr = `${yyyy}-${mm}-${dd}`;
-
-  return s < todayStr;
-}
-
-function getDeviceAccessStatus(dev) {
-  const device = getDevice(dev);
-  if (!device) {
-    return { ok: false, code: 'device_not_found', message: 'device inexistente' };
-  }
-
-  if (device.enabled !== true) {
-    return { ok: false, code: 'device_disabled', message: 'device deshabilitado' };
-  }
-
-  const client = getClient(device.client_id);
-  if (!client) {
-    return { ok: false, code: 'client_not_found', message: 'cliente inexistente' };
-  }
-
-  if (client.active !== true) {
-    return { ok: false, code: 'client_inactive', message: 'cliente inactivo' };
-  }
-
-  const subStatus = String(client.subscription_status || '').trim();
-
-  if (subStatus === 'suspended') {
-    return { ok: false, code: 'client_suspended', message: 'cliente suspendido' };
-  }
-
-  if (subStatus === 'expired') {
-    return { ok: false, code: 'client_expired', message: 'cliente expirado' };
-  }
-
-  if (isDateExpired(client.subscription_until)) {
-    return { ok: false, code: 'subscription_until_expired', message: 'suscripción vencida' };
-  }
-
-  return {
-    ok: true,
-    device,
-    client
-  };
-}
-
-function saveClients(clientsData) {
-  try {
-    fs.writeFileSync(CLIENTS_PATH, JSON.stringify(clientsData, null, 2));
-  } catch (e) {
-    console.error('❌ No pude guardar clients.json:', e.message);
-  }
-}
-
-function saveState(obj) {
-  try {
-    fs.writeFileSync(STATE_PATH, JSON.stringify(obj, null, 2));
-  } catch (e) {
-    console.error('❌ No pude guardar stateByDev.json:', e.message);
-  }
-}
-
 // ================== ESTADO POR DEV ==================
 
-const stateByDev = pruneStateByDevices(loadState());
-saveState(stateByDev);
+const stateByDev = loadState();
 
-// asegurar defaults por cada dev habilitado en devices.json
-getAllowedDevs().forEach((dev) => {
-  const cfg = getDevice(dev) || {};
-
+// asegurar defaults por cada dev (y compatibilidad si el JSON viejo no tiene campos)
+ALLOWED_DEVS.forEach((dev) => {
   if (!stateByDev[dev]) stateByDev[dev] = {};
   stateByDev[dev] = {
     paidEvent: stateByDev[dev].paidEvent ?? null,
     expectedExtRef: stateByDev[dev].expectedExtRef ?? null,
     ultimaPreferencia: stateByDev[dev].ultimaPreferencia ?? null,
     linkActual: stateByDev[dev].linkActual ?? null,
-    rotateScheduled: false,
-    lastPrice: Number(stateByDev[dev].lastPrice ?? cfg.unit_price ?? 100),
-    lastTitle: String(stateByDev[dev].lastTitle ?? cfg.title ?? 'Producto'),
+    rotateScheduled: false, // no lo persistimos, solo runtime
+    lastPrice: Number(stateByDev[dev].lastPrice ?? ITEM_BY_DEV[dev].unit_price),
   };
 });
 
 console.log('📦 stateByDev cargado:', Object.keys(stateByDev));
-console.log('🧩 devices habilitados:', getAllowedDevs());
+console.log('📦 stateByDev resumen:', Object.fromEntries(
+  Object.entries(stateByDev).map(([k,v]) => [k, { expectedExtRef: v.expectedExtRef, ultimaPreferencia: v.ultimaPreferencia, linkActual: !!v.linkActual }])
+));
 
 const pagos = [];
 const processedPayments = new Set();
-const processingPayments = new Set();
+
+// ✅ pagos.log persistente
+const PAYLOG_PATH = path.join(DATA_DIR, 'pagos.log');
 
 // ================== HELPERS ==================
 
@@ -436,59 +158,29 @@ function escapeHtml(str) {
 
 // ================== OAUTH ==================
 
-function buildOauthStateForClient(client_id) {
-  return `client:${String(client_id || '').trim()}`;
-}
-
-function parseOauthState(stateRaw) {
-  const s = String(stateRaw || '').trim();
-
-  if (s.startsWith('client:')) {
-    return { kind: 'client', client_id: s.slice('client:'.length) };
-  }
-
-  return { kind: 'legacy_dev', dev: s.toLowerCase() };
-}
-
-
+// Link que abre tu socio para conectar su cuenta a un dev (bar2 por ejemplo)
 app.get('/connect', (req, res) => {
-  const client_id = String(req.query.client_id || '').trim();
-  const client = getClient(client_id);
-
-  if (!client) return res.status(404).send('client_id invalido');
-  if (client.active !== true) return res.status(403).send('cliente inactivo');
+  const dev = String(req.query.dev || '').toLowerCase();
+  if (!ALLOWED_DEVS.includes(dev)) return res.status(400).send('dev invalido');
 
   const authUrl =
     `https://auth.mercadopago.com.ar/authorization` +
     `?response_type=code` +
     `&client_id=${encodeURIComponent(MP_CLIENT_ID)}` +
     `&redirect_uri=${encodeURIComponent(MP_REDIRECT_URI)}` +
-    `&state=${encodeURIComponent(buildOauthStateForClient(client_id))}`;
+    `&state=${encodeURIComponent(dev)}`;
 
   res.redirect(authUrl);
 });
 
+// Callback: MP vuelve acá con ?code=...&state=bar2
 app.get('/oauth/callback', async (req, res) => {
   try {
     const code = String(req.query.code || '');
-    const parsed = parseOauthState(req.query.state);
+    const dev = String(req.query.state || '').toLowerCase();
 
     if (!code) return res.status(400).send('Falta code');
-
-    let client_id = null;
-
-    if (parsed.kind === 'client') {
-      client_id = String(parsed.client_id || '').trim();
-      const client = getClient(client_id);
-      if (!client) return res.status(400).send('State/client_id invalido');
-    } else {
-      const dev = String(parsed.dev || '').toLowerCase();
-      if (!isDeviceEnabled(dev)) return res.status(400).send('State/dev invalido');
-
-      const device = getDevice(dev);
-      client_id = String(device?.client_id || '').trim();
-      if (!client_id) return res.status(400).send('El dev no tiene client_id');
-    }
+    if (!ALLOWED_DEVS.includes(dev)) return res.status(400).send('State/dev invalido');
 
     const form = new URLSearchParams();
     form.append('grant_type', 'authorization_code');
@@ -504,7 +196,7 @@ app.get('/oauth/callback', async (req, res) => {
     const t = tokenRes.data;
     const expiresAt = Date.now() + (Number(t.expires_in || 0) * 1000);
 
-    tokensByClient[client_id] = {
+    tokensByDev[dev] = {
       access_token: t.access_token,
       refresh_token: t.refresh_token,
       token_type: t.token_type,
@@ -514,12 +206,12 @@ app.get('/oauth/callback', async (req, res) => {
       updated_at: Date.now(),
     };
 
-    saveTokens(tokensByClient);
+    saveTokens(tokensByDev);
 
     res.send(
       `<h2>✅ Conectado OK</h2>
-       <p>Cliente: <b>${escapeHtml(client_id)}</b></p>
-       <p>Ya podés cobrar con todos los devices de este cliente.</p>
+       <p>Dev: <b>${escapeHtml(dev)}</b></p>
+       <p>Ya podés generar links para este dev usando la cuenta del vendedor.</p>
        <p>Volvé al <a href="/panel">/panel</a></p>`
     );
   } catch (err) {
@@ -528,9 +220,9 @@ app.get('/oauth/callback', async (req, res) => {
   }
 });
 
-async function refreshTokenForClient(client_id) {
-  const current = tokensByClient[client_id];
-  if (!current?.refresh_token) throw new Error(`No hay refresh_token para client_id=${client_id}`);
+async function refreshTokenForDev(dev) {
+  const current = tokensByDev[dev];
+  if (!current?.refresh_token) throw new Error(`No hay refresh_token para ${dev}`);
 
   const form = new URLSearchParams();
   form.append('grant_type', 'refresh_token');
@@ -545,7 +237,7 @@ async function refreshTokenForClient(client_id) {
   const t = tokenRes.data;
   const expiresAt = Date.now() + (Number(t.expires_in || 0) * 1000);
 
-  tokensByClient[client_id] = {
+  tokensByDev[dev] = {
     access_token: t.access_token,
     refresh_token: t.refresh_token || current.refresh_token,
     token_type: t.token_type,
@@ -555,24 +247,27 @@ async function refreshTokenForClient(client_id) {
     updated_at: Date.now(),
   };
 
-  saveTokens(tokensByClient);
-  return tokensByClient[client_id].access_token;
+  saveTokens(tokensByDev);
+  return tokensByDev[dev].access_token;
 }
 
-async function getAccessTokenForClient(client_id) {
-  const id = String(client_id || '').trim();
-  if (!id) return null;
+async function getAccessTokenForDev(dev) {
+  // ✅ bar1/bar2/bar3 cobran a TU cuenta (sin OAuth)
+  if (dev === 'bar1' || dev === 'bar2' || dev === 'bar3') {
+    return ACCESS_TOKEN;
+  }
 
-  const t = tokensByClient[id];
+  // (si en el futuro agregás otros devs OAuth, quedaría acá)
+  const t = tokensByDev[dev];
   if (!t?.access_token) return null;
 
   const marginMs = 60_000;
   if (t.expires_at && Date.now() > (t.expires_at - marginMs)) {
     try {
-      console.log(`🔁 Refresh token para client_id=${id}...`);
-      return await refreshTokenForClient(id);
+      console.log(`🔁 Refresh token para ${dev}...`);
+      return await refreshTokenForDev(dev);
     } catch (e) {
-      console.error(`❌ No pude refrescar token para client_id=${id}:`, e.response?.data || e.message);
+      console.error(`❌ No pude refrescar token para ${dev}:`, e.response?.data || e.message);
       return null;
     }
   }
@@ -580,42 +275,13 @@ async function getAccessTokenForClient(client_id) {
   return t.access_token;
 }
 
-async function getAccessTokenForDev(dev) {
-  const cfg = getDevice(dev);
-  if (!cfg) return null;
-
-  const tokenMode = String(cfg.token_mode || '').trim();
-
-  if (tokenMode === 'main_account') {
-    return ACCESS_TOKEN;
-  }
-
-  if (tokenMode !== 'oauth_seller') {
-    console.error(`❌ token_mode inválido para ${dev}:`, JSON.stringify(cfg.token_mode));
-    return null;
-  }
-
-  const client_id = String(cfg.client_id || '').trim();
-  if (!client_id) return null;
-
-  return await getAccessTokenForClient(client_id);
-}
-
 // ================== MP: CREAR PREFERENCIA ==================
 
-async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
-  const cfg = getDevice(dev);
-  if (!cfg) throw new Error(`Device no definido para dev=${dev}`);
-
-  const baseItem = getDeviceItem(dev);
+async function generarNuevoLinkParaDev(dev, priceOverride) {
+  const baseItem = ITEM_BY_DEV[dev];
   if (!baseItem) throw new Error(`Item no definido para dev=${dev}`);
 
   const item = { ...baseItem };
-
-  if (typeof titleOverride === 'string') {
-    const t = titleOverride.trim();
-    if (t.length >= 2 && t.length <= 60) item.title = t;
-  }
 
   if (Number.isFinite(priceOverride) && priceOverride >= 100 && priceOverride <= 65000) {
     item.unit_price = priceOverride;
@@ -623,13 +289,13 @@ async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
 
   const sellerToken = await getAccessTokenForDev(dev);
   if (!sellerToken) {
-    throw new Error(`Dev ${dev} no tiene token disponible para cobrar`);
+    throw new Error(`Dev ${dev} no está conectado por OAuth (no hay token vendedor)`);
   }
 
   const headers = { Authorization: `Bearer ${sellerToken}` };
   const extRef = buildUniqueExtRef(dev);
 
-  const pct = Number(cfg.fee_pct || 0);
+  const pct = Number(MARKETPLACE_FEE_PERCENT_BY_DEV[dev] || 0);
 
   let fee = Math.round(item.unit_price * pct);
   if (pct > 0) fee = Math.max(MARKETPLACE_FEE_MIN, fee);
@@ -644,20 +310,18 @@ async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
   const res = await axios.post(
     'https://api.mercadopago.com/checkout/preferences',
     body,
-    { headers }
+    { headers },
   );
 
   const pref = res.data;
   const prefId = pref.id || pref.preference_id;
 
-  if (!stateByDev[dev]) stateByDev[dev] = {};
-
   stateByDev[dev].ultimaPreferencia = prefId;
   stateByDev[dev].linkActual = pref.init_point;
   stateByDev[dev].expectedExtRef = extRef;
   stateByDev[dev].lastPrice = item.unit_price;
-  stateByDev[dev].lastTitle = item.title;
 
+  // ✅ persistir state
   saveState(stateByDev);
 
   console.log(`🔄 Nuevo link generado para ${dev}:`, {
@@ -668,34 +332,22 @@ async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
     marketplace_fee: fee,
   });
 
-  return {
-    preference_id: prefId,
-    external_reference: extRef,
-    link: pref.init_point,
-    price: item.unit_price
-  };
+  return { preference_id: prefId, external_reference: extRef, link: pref.init_point, price: item.unit_price };
 }
 
-function recargarLinkConReintento(dev, priceOverride, titleOverride, intento = 1) {
+function recargarLinkConReintento(dev, intento = 1) {
   const MAX_INTENTOS = 5;
   const esperaMs = 2000 * intento;
 
-  generarNuevoLinkParaDev(
-    dev,
-    priceOverride,
-    titleOverride
-  ).catch((err) => {
+  generarNuevoLinkParaDev(dev, stateByDev[dev]?.lastPrice).catch((err) => {
     console.error(
       `❌ Error al regenerar link para ${dev} (intento ${intento}):`,
-      err.response?.data || err.message
+      err.response?.data || err.message,
     );
 
     if (intento < MAX_INTENTOS) {
       console.log(`⏳ Reintentando generar link para ${dev} en ${esperaMs} ms...`);
-      setTimeout(
-        () => recargarLinkConReintento(dev, priceOverride, titleOverride, intento + 1),
-        esperaMs
-      );
+      setTimeout(() => recargarLinkConReintento(dev, intento + 1), esperaMs);
     } else {
       console.log(`⚠️ Se agotaron reintentos para ${dev}. Se mantiene último link.`);
     }
@@ -711,41 +363,25 @@ app.get('/', (req, res) => {
 app.get('/nuevo-link', async (req, res) => {
   try {
     const dev = (req.query.dev || '').toLowerCase();
-
-    const access = getDeviceAccessStatus(dev);
-    if (!access.ok) {
-      return res.status(403).json({
-        error: access.message,
-        code: access.code,
-        dev
-      });
+    if (!ALLOWED_DEVS.includes(dev)) {
+      return res.status(400).json({ error: 'dev invalido' });
     }
 
+    // ✅ idempotente: si ya hay QR vigente, devolvelo (salvo force=1)
     const force = String(req.query.force || '') === '1';
     const st = stateByDev[dev];
-
-    let titleReq = req.query.title;
-    if (typeof titleReq === 'string') {
-      titleReq = titleReq.trim();
-      if (titleReq.length < 2 || titleReq.length > 60) titleReq = null;
-    } else {
-      titleReq = null;
-    }
-
-    // si no mandan title por query, usa el último guardado
-    const finalTitle = titleReq ?? String(st?.lastTitle ?? getDevice(dev)?.title ?? 'Producto');
-    const titleChanged = (finalTitle && String(st?.lastTitle) !== String(finalTitle));
 
     let priceReq = Number(req.query.price);
     if (!Number.isFinite(priceReq) || priceReq < 100 || priceReq > 65000) priceReq = null;
 
     const priceChanged = (priceReq !== null && Number(st?.lastPrice) !== Number(priceReq));
 
-    if (!force && st?.linkActual && st?.expectedExtRef && st?.ultimaPreferencia && !priceChanged && !titleChanged) {
+
+    if (!force && st?.linkActual && st?.expectedExtRef && st?.ultimaPreferencia && !priceChanged) {
       return res.json({
         dev,
         link: st.linkActual,
-        title: st.lastTitle || getDevice(dev)?.title || 'Producto',
+        title: ITEM_BY_DEV[dev].title,
         price: st.lastPrice,
         external_reference: st.expectedExtRef,
         preference_id: st.ultimaPreferencia,
@@ -756,12 +392,12 @@ app.get('/nuevo-link', async (req, res) => {
     let price = Number(req.query.price);
     if (!Number.isFinite(price) || price < 100 || price > 65000) price = undefined;
 
-    const info = await generarNuevoLinkParaDev(dev, price, finalTitle);
+    const info = await generarNuevoLinkParaDev(dev, price);
 
     res.json({
       dev,
       link: info.link,
-      title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
+      title: ITEM_BY_DEV[dev].title,
       price: info.price,
       external_reference: info.external_reference,
       preference_id: info.preference_id,
@@ -775,7 +411,7 @@ app.get('/nuevo-link', async (req, res) => {
 
 app.get('/estado', (req, res) => {
   const dev = (req.query.dev || '').toLowerCase();
-  if (!isDeviceEnabled(dev)) {
+  if (!ALLOWED_DEVS.includes(dev)) {
     return res.status(400).json({ error: 'dev invalido' });
   }
 
@@ -787,1406 +423,90 @@ app.get('/ack', (req, res) => {
   const dev = (req.query.dev || '').toLowerCase();
   const payment_id = String(req.query.payment_id || '');
 
-  if (!isDeviceEnabled(dev)) return res.status(400).json({ error: 'dev invalido' });
+  if (!ALLOWED_DEVS.includes(dev)) return res.status(400).json({ error: 'dev invalido' });
   if (!payment_id) return res.status(400).json({ error: 'payment_id requerido' });
 
   const st = stateByDev[dev];
   if (st.paidEvent && String(st.paidEvent.payment_id) === payment_id) {
     st.paidEvent = null;
+
+    // ✅ persistir state
     saveState(stateByDev);
+
     return res.json({ ok: true });
   }
   res.json({ ok: false });
 });
 
-app.post('/set-item', requireAdmin, (req, res) => {
-  try {
-    const dev = String(req.body.dev || '').toLowerCase();
-    if (!isDeviceEnabled(dev)) {
-      return res.status(400).json({ error: 'dev invalido' });
-    }
-
-    let price = Number(req.body.price);
-    if (!Number.isFinite(price) || price < 100 || price > 65000) {
-      return res.status(400).json({ error: 'price invalido' });
-    }
-
-    let title = String(req.body.title || '').trim();
-    if (title.length < 2 || title.length > 60) {
-      return res.status(400).json({ error: 'title invalido (2..60)' });
-    }
-
-    stateByDev[dev].lastPrice = price;
-    stateByDev[dev].lastTitle = title;
-    stateByDev[dev].paidEvent = null;
-
-    saveState(stateByDev);
-
-    recargarLinkConReintento(dev, price, title);
-
-    res.json({ ok: true, dev, price, title });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/admin/devices', requireAdmin, (req, res) => {
-  try {
-    const devices = getDevices();
-
-    const out = Object.entries(devices).map(([dev, cfg]) => ({
-      dev,
-      ...cfg,
-      state: stateByDev[dev] || null,
-      oauth_connected: !!tokensByClient[String(cfg?.client_id || '').trim()]?.access_token,
-    }));
-
-    res.json({
-      ok: true,
-      count: out.length,
-      devices: out
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/admin/device/create', requireAdmin, (req, res) => {
-  try {
-    const dev = String(req.body.dev || '').trim().toLowerCase();
-    const client_id = String(req.body.client_id || '').trim();
-    const title = String(req.body.title || '').trim();
-    const quantity = Number(req.body.quantity || 1);
-    const currency_id = String(req.body.currency_id || 'ARS').trim().toUpperCase();
-    const unit_price = Number(req.body.unit_price);
-    const fee_pct = Number(req.body.fee_pct || 0);
-    const token_mode = String(req.body.token_mode || '').trim();
-    const enabled = req.body.enabled === false ? false : true;
-    const kind = String(req.body.kind || 'generic').trim();
-
-    if (!/^[a-z0-9_-]{3,40}$/.test(dev)) {
-      return res.status(400).json({ error: 'dev invalido (3..40, a-z0-9_-)' });
-    }
-
-    if (!client_id || client_id.length < 2 || client_id.length > 60) {
-      return res.status(400).json({ error: 'client_id invalido' });
-    }
-
-    if (!title || title.length < 2 || title.length > 60) {
-      return res.status(400).json({ error: 'title invalido' });
-    }
-
-    if (!Number.isFinite(quantity) || quantity < 1 || quantity > 100) {
-      return res.status(400).json({ error: 'quantity invalido' });
-    }
-
-    if (!currency_id || currency_id.length !== 3) {
-      return res.status(400).json({ error: 'currency_id invalido' });
-    }
-
-    if (!Number.isFinite(unit_price) || unit_price < 100 || unit_price > 65000) {
-      return res.status(400).json({ error: 'unit_price invalido' });
-    }
-
-    if (!Number.isFinite(fee_pct) || fee_pct < 0 || fee_pct > 1) {
-      return res.status(400).json({ error: 'fee_pct invalido (usar 0.03 para 3%)' });
-    }
-
-    if (!['main_account', 'oauth_seller'].includes(token_mode)) {
-      return res.status(400).json({ error: 'token_mode invalido' });
-    }
-
-    const devices = getDevices();
-
-    if (devices[dev]) {
-      return res.status(400).json({ error: 'ese dev ya existe' });
-    }
-
-    const device_key =
-      String(req.body.device_key || '').trim() ||
-      ('dk_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36));
-
-    devicesData.devices[dev] = {
-      client_id,
-      title,
-      quantity,
-      currency_id,
-      unit_price,
-      fee_pct,
-      token_mode,
-      enabled,
-      kind,
-      device_key
-    };
-
-    saveDevices(devicesData);
-
-    if (!stateByDev[dev]) {
-      stateByDev[dev] = {
-        paidEvent: null,
-        expectedExtRef: null,
-        ultimaPreferencia: null,
-        linkActual: null,
-        rotateScheduled: false,
-        lastPrice: unit_price,
-        lastTitle: title,
-      };
-      saveState(stateByDev);
-    }
-
-    res.json({
-      ok: true,
-      dev,
-      device: devicesData.devices[dev]
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/device/register', (req, res) => {
-  try {
-    const client_id = String(req.body.client_id || '').trim();
-    const dev = String(req.body.dev || '').trim().toLowerCase();
-    const ap_password = String(req.body.ap_password || '').trim();
-    const kind = String(req.body.kind || 'beer_tap').trim();
-
-    if (!client_id) {
-      return res.status(400).json({ error: 'client_id requerido' });
-    }
-
-    if (!/^[a-z0-9_-]{3,40}$/.test(dev)) {
-      return res.status(400).json({ error: 'dev invalido (3..40, a-z0-9_-)' });
-    }
-
-    if (ap_password.length < 8 || ap_password.length > 63) {
-      return res.status(400).json({ error: 'ap_password invalida (8..63)' });
-    }
-
-    const client = getClient(client_id);
-    if (!client) {
-      return res.status(404).json({ error: 'cliente no existe', code: 'client_not_found' });
-    }
-
-    if (client.active !== true) {
-      return res.status(403).json({ error: 'cliente inactivo', code: 'client_inactive' });
-    }
-
-    const subStatus = String(client.subscription_status || '').trim();
-    if (subStatus === 'suspended') {
-      return res.status(403).json({ error: 'cliente suspendido', code: 'client_suspended' });
-    }
-
-    if (subStatus === 'expired') {
-      return res.status(403).json({ error: 'cliente expirado', code: 'client_expired' });
-    }
-
-    if (isDateExpired(client.subscription_until)) {
-      return res.status(403).json({ error: 'suscripción vencida', code: 'subscription_until_expired' });
-    }
-
-    const devices = getDevices();
-    if (devices[dev]) {
-      return res.status(400).json({ error: 'ese dev ya existe', code: 'dev_already_exists' });
-    }
-
-    const defaultFee = Number(client.default_fee_pct || 0);
-    const inferredTokenMode =
-      client.plan_type === 'marketplace_fee' ? 'oauth_seller' : 'main_account';
-
-    const device_key =
-      'dk_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
-
-    devicesData.devices[dev] = {
-      client_id,
-      title: kind === 'ticket' ? 'Qtiket' : 'QdRink',
-      quantity: 1,
-      currency_id: 'ARS',
-      unit_price: 1000,
-      fee_pct: defaultFee,
-      token_mode: inferredTokenMode,
-      enabled: true,
-      kind,
-      device_key
-    };
-
-    saveDevices(devicesData);
-
-    stateByDev[dev] = {
-      paidEvent: null,
-      expectedExtRef: null,
-      ultimaPreferencia: null,
-      linkActual: null,
-      rotateScheduled: false,
-      lastPrice: devicesData.devices[dev].unit_price,
-      lastTitle: devicesData.devices[dev].title,
-    };
-    saveState(stateByDev);
-
-    res.json({
-      ok: true,
-      client_id,
-      dev,
-      device_key,
-      ap_password,
-      kind
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/device/config/update', (req, res) => {
-  try {
-    const dev = String(req.body.dev || '').trim().toLowerCase();
-    const device_key = String(req.body.device_key || '').trim();
-    const title = String(req.body.title || '').trim();
-    const unit_price = Number(req.body.unit_price);
-
-    if (!dev) {
-      return res.status(400).json({ error: 'dev requerido' });
-    }
-
-    const device = getDevice(dev);
-    if (!device) {
-      return res.status(404).json({ error: 'device no existe' });
-    }
-
-    if (!device.device_key || device_key !== String(device.device_key)) {
-      return res.status(401).json({ error: 'device_key invalida' });
-    }
-
-    if (title.length < 2 || title.length > 60) {
-      return res.status(400).json({ error: 'title invalido' });
-    }
-
-    if (!Number.isFinite(unit_price) || unit_price < 100 || unit_price > 65000) {
-      return res.status(400).json({ error: 'unit_price invalido' });
-    }
-
-    devicesData.devices[dev].title = title;
-    devicesData.devices[dev].unit_price = unit_price;
-    saveDevices(devicesData);
-
-    if (!stateByDev[dev]) {
-      stateByDev[dev] = {
-        paidEvent: null,
-        expectedExtRef: null,
-        ultimaPreferencia: null,
-        linkActual: null,
-        rotateScheduled: false,
-        lastPrice: unit_price,
-        lastTitle: title,
-      };
-    } else {
-      stateByDev[dev].lastTitle = title;
-      stateByDev[dev].lastPrice = unit_price;
-      stateByDev[dev].paidEvent = null;
-      stateByDev[dev].expectedExtRef = null;
-      stateByDev[dev].ultimaPreferencia = null;
-      stateByDev[dev].linkActual = null;
-    }
-
-    saveState(stateByDev);
-    recargarLinkConReintento(dev, unit_price, title);
-
-    res.json({
-      ok: true,
-      dev,
-      title,
-      unit_price
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/admin/device/update', requireAdmin, (req, res) => {
-  try {
-    const dev = String(req.body.dev || '').trim().toLowerCase();
-    const current = getDevice(dev);
-
-    if (!current) {
-      return res.status(404).json({ error: 'dev no existe' });
-    }
-
-    const patch = {};
-
-    if (req.body.client_id !== undefined) {
-      const client_id = String(req.body.client_id || '').trim();
-      if (!client_id || client_id.length < 2 || client_id.length > 60) {
-        return res.status(400).json({ error: 'client_id invalido' });
-      }
-      patch.client_id = client_id;
-    }
-
-    if (req.body.title !== undefined) {
-      const title = String(req.body.title || '').trim();
-      if (!title || title.length < 2 || title.length > 60) {
-        return res.status(400).json({ error: 'title invalido' });
-      }
-      patch.title = title;
-    }
-
-    if (req.body.quantity !== undefined) {
-      const quantity = Number(req.body.quantity);
-      if (!Number.isFinite(quantity) || quantity < 1 || quantity > 100) {
-        return res.status(400).json({ error: 'quantity invalido' });
-      }
-      patch.quantity = quantity;
-    }
-
-    if (req.body.currency_id !== undefined) {
-      const currency_id = String(req.body.currency_id || '').trim().toUpperCase();
-      if (!currency_id || currency_id.length !== 3) {
-        return res.status(400).json({ error: 'currency_id invalido' });
-      }
-      patch.currency_id = currency_id;
-    }
-
-    if (req.body.unit_price !== undefined) {
-      const unit_price = Number(req.body.unit_price);
-      if (!Number.isFinite(unit_price) || unit_price < 100 || unit_price > 65000) {
-        return res.status(400).json({ error: 'unit_price invalido' });
-      }
-      patch.unit_price = unit_price;
-    }
-
-    if (req.body.fee_pct !== undefined) {
-      const fee_pct = Number(req.body.fee_pct);
-      if (!Number.isFinite(fee_pct) || fee_pct < 0 || fee_pct > 1) {
-        return res.status(400).json({ error: 'fee_pct invalido' });
-      }
-      patch.fee_pct = fee_pct;
-    }
-
-    if (req.body.token_mode !== undefined) {
-      const token_mode = String(req.body.token_mode || '').trim();
-      if (!['main_account', 'oauth_seller'].includes(token_mode)) {
-        return res.status(400).json({ error: 'token_mode invalido' });
-      }
-      patch.token_mode = token_mode;
-    }
-
-    if (req.body.enabled !== undefined) {
-      patch.enabled = !!req.body.enabled;
-    }
-
-    if (req.body.kind !== undefined) {
-      patch.kind = String(req.body.kind || 'generic').trim();
-    }
-
-    if (req.body.device_key !== undefined) {
-      const device_key = String(req.body.device_key || '').trim();
-      if (!device_key || device_key.length < 8 || device_key.length > 120) {
-        return res.status(400).json({ error: 'device_key invalida' });
-      }
-      patch.device_key = device_key;
-    }
-
-    devicesData.devices[dev] = {
-      ...current,
-      ...patch
-    };
-
-    saveDevices(devicesData);
-
-    if (!stateByDev[dev]) {
-      stateByDev[dev] = {
-        paidEvent: null,
-        expectedExtRef: null,
-        ultimaPreferencia: null,
-        linkActual: null,
-        rotateScheduled: false,
-        lastPrice: devicesData.devices[dev].unit_price,
-        lastTitle: devicesData.devices[dev].title,
-      };
-    } else {
-      stateByDev[dev].lastTitle = devicesData.devices[dev].title;
-      stateByDev[dev].lastPrice = devicesData.devices[dev].unit_price;
-    }
-
-    stateByDev[dev].paidEvent = null;
-    stateByDev[dev].expectedExtRef = null;
-    stateByDev[dev].ultimaPreferencia = null;
-    stateByDev[dev].linkActual = null;
-
-    saveState(stateByDev);
-    recargarLinkConReintento(
-      dev,
-      devicesData.devices[dev].unit_price,
-      devicesData.devices[dev].title
-    );
-
-    res.json({
-      ok: true,
-      dev,
-      device: devicesData.devices[dev]
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-
-app.post('/admin/device/delete', requireAdmin, (req, res) => {
-  try {
-    const dev = String(req.body.dev || '').trim().toLowerCase();
-
-    if (!dev) {
-      return res.status(400).json({ error: 'dev requerido' });
-    }
-
-    const current = getDevice(dev);
-    if (!current) {
-      return res.status(404).json({ error: 'dev no existe' });
-    }
-
-    delete devicesData.devices[dev];
-    saveDevices(devicesData);
-
-    if (stateByDev[dev]) {
-      delete stateByDev[dev];
-      saveState(stateByDev);
-    }
-
-
-    res.json({ ok: true, dev });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/admin/clients', requireAdmin, (req, res) => {
-  try {
-    const clients = getClients();
-    const devices = getDevices();
-
-    const out = Object.entries(clients).map(([client_id, cfg]) => {
-      const clientDevices = Object.entries(devices)
-        .filter(([, d]) => d?.client_id === client_id)
-        .map(([dev, d]) => ({
-          dev,
-          title: d.title,
-          unit_price: d.unit_price,
-          token_mode: d.token_mode,
-          enabled: d.enabled,
-          kind: d.kind
-        }));
-
-      const tok = tokensByClient[client_id] || null;
-
-      return {
-        client_id,
-        ...cfg,
-        devices_count: clientDevices.length,
-        devices: clientDevices,
-        oauth_connected: !!tok?.access_token,
-        oauth_user_id: tok?.user_id || null,
-        oauth_updated_at: tok?.updated_at || null
-      };
-    });
-
-    res.json({
-      ok: true,
-      count: out.length,
-      clients: out
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/admin/client/create', requireAdmin, (req, res) => {
-  try {
-    const client_id = String(req.body.client_id || '').trim();
-    const display_name = String(req.body.display_name || '').trim();
-    const plan_type = String(req.body.plan_type || '').trim();
-    const default_fee_pct = Number(req.body.default_fee_pct || 0);
-    const subscription_status = String(req.body.subscription_status || '').trim();
-    const subscription_until_raw = req.body.subscription_until;
-    const active = req.body.active === false ? false : true;
-
-    if (!/^[a-zA-Z0-9_-]{2,60}$/.test(client_id)) {
-      return res.status(400).json({ error: 'client_id invalido (2..60, a-zA-Z0-9_-)' });
-    }
-
-    if (!display_name || display_name.length < 2 || display_name.length > 80) {
-      return res.status(400).json({ error: 'display_name invalido' });
-    }
-
-    if (!['direct', 'marketplace_fee', 'subscription'].includes(plan_type)) {
-      return res.status(400).json({ error: 'plan_type invalido' });
-    }
-
-    if (!Number.isFinite(default_fee_pct) || default_fee_pct < 0 || default_fee_pct > 1) {
-      return res.status(400).json({ error: 'default_fee_pct invalido (usar 0.03 para 3%)' });
-    }
-
-    if (!['active', 'suspended', 'expired'].includes(subscription_status)) {
-      return res.status(400).json({ error: 'subscription_status invalido' });
-    }
-
-    let subscription_until = null;
-    if (subscription_until_raw !== undefined && subscription_until_raw !== null && String(subscription_until_raw).trim() !== '') {
-      const s = String(subscription_until_raw).trim();
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-        return res.status(400).json({ error: 'subscription_until invalido (usar YYYY-MM-DD)' });
-      }
-      subscription_until = s;
-    }
-
-    const clients = getClients();
-    if (clients[client_id]) {
-      return res.status(400).json({ error: 'ese client_id ya existe' });
-    }
-
-    clientsData.clients[client_id] = {
-      display_name,
-      plan_type,
-      default_fee_pct,
-      subscription_status,
-      subscription_until,
-      active
-    };
-
-    saveClients(clientsData);
-
-    res.json({
-      ok: true,
-      client_id,
-      client: clientsData.clients[client_id]
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/admin/client/update', requireAdmin, (req, res) => {
-  try {
-    const client_id = String(req.body.client_id || '').trim();
-    const current = getClient(client_id);
-
-    if (!current) {
-      return res.status(404).json({ error: 'client_id no existe' });
-    }
-
-    const patch = {};
-
-    if (req.body.display_name !== undefined) {
-      const display_name = String(req.body.display_name || '').trim();
-      if (!display_name || display_name.length < 2 || display_name.length > 80) {
-        return res.status(400).json({ error: 'display_name invalido' });
-      }
-      patch.display_name = display_name;
-    }
-
-    if (req.body.plan_type !== undefined) {
-      const plan_type = String(req.body.plan_type || '').trim();
-      if (!['direct', 'marketplace_fee', 'subscription'].includes(plan_type)) {
-        return res.status(400).json({ error: 'plan_type invalido' });
-      }
-      patch.plan_type = plan_type;
-    }
-
-    if (req.body.default_fee_pct !== undefined) {
-      const default_fee_pct = Number(req.body.default_fee_pct);
-      if (!Number.isFinite(default_fee_pct) || default_fee_pct < 0 || default_fee_pct > 1) {
-        return res.status(400).json({ error: 'default_fee_pct invalido (usar 0.03 para 3%)' });
-      }
-      patch.default_fee_pct = default_fee_pct;
-    }
-
-    if (req.body.subscription_status !== undefined) {
-      const subscription_status = String(req.body.subscription_status || '').trim();
-      if (!['active', 'suspended', 'expired'].includes(subscription_status)) {
-        return res.status(400).json({ error: 'subscription_status invalido' });
-      }
-      patch.subscription_status = subscription_status;
-    }
-
-    if (req.body.subscription_until !== undefined) {
-      const raw = req.body.subscription_until;
-      if (raw === null || String(raw).trim() === '') {
-        patch.subscription_until = null;
-      } else {
-        const s = String(raw).trim();
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-          return res.status(400).json({ error: 'subscription_until invalido (usar YYYY-MM-DD)' });
-        }
-        patch.subscription_until = s;
-      }
-    }
-
-    if (req.body.active !== undefined) {
-      patch.active = !!req.body.active;
-    }
-
-    clientsData.clients[client_id] = {
-      ...current,
-      ...patch
-    };
-
-    saveClients(clientsData);
-
-    res.json({
-      ok: true,
-      client_id,
-      client: clientsData.clients[client_id]
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-
-app.post('/admin/client/delete', requireAdmin, (req, res) => {
-  try {
-    const client_id = String(req.body.client_id || '').trim();
-
-    if (!client_id) {
-      return res.status(400).json({ error: 'client_id requerido' });
-    }
-
-    const current = getClient(client_id);
-    if (!current) {
-      return res.status(404).json({ error: 'client_id no existe' });
-    }
-
-    const linkedDevices = Object.entries(getDevices())
-      .filter(([, d]) => d?.client_id === client_id)
-      .map(([dev]) => dev);
-
-    if (linkedDevices.length > 0) {
-      return res.status(400).json({
-        error: 'no se puede eliminar el cliente porque tiene devices asociados',
-        code: 'client_has_devices',
-        devices: linkedDevices
-      });
-    }
-
-    delete clientsData.clients[client_id];
-    saveClients(clientsData);
-
-    if (tokensByClient[client_id]) {
-      delete tokensByClient[client_id];
-      saveTokens(tokensByClient);
-    }
-
-    res.json({ ok: true, client_id });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-
-app.get('/panel', requireAdmin, (req, res) => {
-  const devicesEntries = Object.entries(getDevices()).sort((a, b) => a[0].localeCompare(b[0]));
-  const clientsEntries = Object.entries(getClients()).sort((a, b) => a[0].localeCompare(b[0]));
-
-  const deviceConfigBoxes = devicesEntries.map(([dev, d]) => {
-    const st = stateByDev[dev] || {};
-    return `
-    <div class="box">
-      <h3>Config ${escapeHtml(String(d.title || dev))} (${escapeHtml(dev)})</h3>
-      <form method="post" action="/set-item" data-out="setResp_${escapeHtml(dev)}" onsubmit="return sendForm(event)">
-        <input type="hidden" name="dev" value="${escapeHtml(dev)}" />
-
-        <div style="margin:6px 0;">
-          <label>Título:</label><br/>
-          <input name="title" style="width:320px;" value="${escapeHtml(String(st.lastTitle || d.title || 'Producto'))}" />
-        </div>
-
-        <div style="margin:6px 0;">
-          <label>Precio:</label><br/>
-          <input name="price" style="width:120px;" value="${escapeHtml(String(st.lastPrice || d.unit_price || 100))}" />
-        </div>
-
-        <button type="submit">Guardar y regenerar QR</button>
-        <div class="muted" id="setResp_${escapeHtml(dev)}" style="margin-top:6px;"></div>
-      </form>
-    </div>
-    `;
-  }).join('');
-
-  const devicesTableRows = devicesEntries.map(([dev, d]) => {
-    const oauthConnected = !!tokensByClient[String(d.client_id || '').trim()]?.access_token;
-    const st = stateByDev[dev] || {};
-    return `
-      <tr>
-        <td>${escapeHtml(dev)}</td>
-        <td>${escapeHtml(String(d.client_id || ''))}</td>
-        <td>${escapeHtml(String(d.title || ''))}</td>
-        <td>${escapeHtml(String(d.unit_price || ''))}</td>
-        <td>${escapeHtml(String(st.lastPrice || d.unit_price || ''))}</td>
-        <td>${escapeHtml(String(d.fee_pct || 0))}</td>
-        <td>${escapeHtml(String(d.token_mode || ''))}</td>
-        <td>${escapeHtml(String(d.enabled))}</td>
-        <td>${escapeHtml(String(d.kind || ''))}</td>
-        <td>${oauthConnected ? 'sí' : 'no'}</td>
-        <td><button type="button" onclick="deleteDevice('${escapeHtml(dev)}')">Eliminar</button></td>
-      </tr>
-    `;
-  }).join('');
-
-  const clientsTableRows = clientsEntries.map(([client_id, cfg]) => {
-    const linkedDevices = devicesEntries
-      .filter(([, d]) => d?.client_id === client_id)
-      .map(([dev]) => dev);
-    const tok = tokensByClient[client_id] || null;
-    const oauthConnected = !!tok?.access_token;
-    const oauthUpdated = tok?.updated_at ? new Date(tok.updated_at).toLocaleString('es-AR') : '';
-
-    return `
-      <tr>
-        <td>${escapeHtml(client_id)}</td>
-        <td>${escapeHtml(String(cfg.display_name || ''))}</td>
-        <td>${escapeHtml(String(cfg.plan_type || ''))}</td>
-        <td>${escapeHtml(String(cfg.default_fee_pct || 0))}</td>
-        <td>${escapeHtml(String(cfg.subscription_status || ''))}</td>
-        <td>${escapeHtml(String(cfg.subscription_until || ''))}</td>
-        <td>${escapeHtml(String(cfg.active))}</td>
-        <td>${escapeHtml(linkedDevices.join(', '))}</td>
-        <td>${oauthConnected ? 'sí' : 'no'}</td>
-        <td>${escapeHtml(String(tok?.user_id || ''))}</td>
-        <td>${escapeHtml(String(oauthUpdated || ''))}</td>
-        <td><a href="/connect?client_id=${encodeURIComponent(client_id)}&key=${encodeURIComponent(ADMIN_KEY)}">Conectar MP</a></td>
-        <td><button type="button" onclick="deleteClient('${escapeHtml(client_id)}')">Eliminar</button></td>
-      </tr>
-    `;
-  }).join('');
-
+app.get('/panel', (req, res) => {
   let html = `
-  <html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Panel QdRink</title>
-    <style>
-      body { font-family: sans-serif; background:#111; color:#eee; padding: 10px; }
-      a { color: #9ad; }
-      table { border-collapse: collapse; width: 100%; margin-top: 10px; }
-      th, td { border: 1px solid #444; padding: 6px 8px; font-size: 13px; vertical-align: top; }
-      th { background: #222; }
-      tr:nth-child(even) { background:#1b1b1b; }
-      .muted { color:#aaa; font-size: 12px; }
-      .box { background:#181818; border:1px solid #333; padding:10px; border-radius: 6px; margin-top:10px; }
-      input, select { padding:6px; border-radius:4px; border:1px solid #555; background:#222; color:#eee; }
-      button { padding:8px 12px; border:none; border-radius:4px; background:#2d6cdf; color:white; cursor:pointer; }
-      button:hover { opacity:0.9; }
-      .danger { background:#a33; }
-      .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap:10px; }
-      .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#222; border:1px solid #444; margin-right:6px; }
-    </style>
-  </head>
-  <body>
+  <html><head><meta charset="utf-8" />
+  <title>Panel QdRink</title>
+  <style>
+    body { font-family: sans-serif; background:#111; color:#eee; padding: 10px; }
+    a { color: #9ad; }
+    table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+    th, td { border: 1px solid #444; padding: 6px 8px; font-size: 13px; }
+    th { background: #222; }
+    tr:nth-child(even) { background:#1b1b1b; }
+    .muted { color:#aaa; font-size: 12px; }
+    .box { background:#181818; border:1px solid #333; padding:10px; border-radius: 6px; }
+  </style>
+  </head><body>
     <h1>Panel QdRink</h1>
 
     <div class="box">
-      <div class="muted">Resumen</div>
-      <div style="margin-top:6px;">
-        <span class="pill">Clients: ${clientsEntries.length}</span>
-        <span class="pill">Devices: ${devicesEntries.length}</span>
-        <span class="pill">Devices habilitados: ${getAllowedDevs().length}</span>
-      </div>
-      <div class="muted" style="margin-top:8px;">Ahora el panel ya no depende de bar4/bar5. Todo sale de clients.json y devices.json.</div>
-    </div>
-
-    ${deviceConfigBoxes || '<div class="box"><div class="muted">No hay devices cargados todavía.</div></div>'}
-
-    <div class="box">
-      <div class="muted">Conectar vendedor (OAuth por cliente):</div>
+      <div class="muted">Conectar vendedor (tu socio) por dev:</div>
       <ul>
-        ${clientsEntries
-          .filter(([client_id]) => devicesEntries.some(([, d]) => d?.client_id === client_id && d?.enabled === true && d?.token_mode === 'oauth_seller'))
-          .map(([client_id, cfg]) => `<li><a href="/connect?client_id=${encodeURIComponent(client_id)}&key=${encodeURIComponent(ADMIN_KEY)}">/connect?client_id=${escapeHtml(client_id)}</a> <span class="muted">(${escapeHtml(String(cfg.display_name || ''))})</span></li>`)
-          .join('') || '<li class="muted">No hay clientes con devices oauth_seller habilitados.</li>'}
+        <li><a href="/connect?dev=bar2">/connect?dev=bar2</a> (bar2)</li>
+        <li><a href="/connect?dev=bar3">/connect?dev=bar3</a> (bar3)</li>
       </ul>
+      <div class="muted">Tokens guardados (resumen):</div>
+      <pre class="muted">${escapeHtml(JSON.stringify(Object.fromEntries(
+        Object.entries(tokensByDev).map(([k,v]) => [k, { user_id: v.user_id, updated_at: v.updated_at, expires_at: v.expires_at }])
+      ), null, 2))}</pre>
+
+      <div class="muted">Paths:</div>
+      <pre class="muted">${escapeHtml(JSON.stringify({
+        DATA_DIR,
+        TOKENS_PATH,
+        STATE_PATH,
+        PAYLOG_PATH,
+        tokens_exists: fs.existsSync(TOKENS_PATH),
+        state_exists: fs.existsSync(STATE_PATH),
+      }, null, 2))}</pre>
     </div>
 
-    <div class="grid">
-      <div class="box">
-        <h3>Crear cliente</h3>
-        <form onsubmit="return createClient(event)">
-          <div style="margin:6px 0;">
-            <label>Client ID:</label><br/>
-            <input name="client_id" style="width:220px;" placeholder="cliente02" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Nombre visible:</label><br/>
-            <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Plan:</label><br/>
-            <select name="plan_type" style="width:220px;">
-              <option value="direct">direct</option>
-              <option value="marketplace_fee">marketplace_fee</option>
-              <option value="subscription">subscription</option>
-            </select>
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Fee por defecto (ej 0.03):</label><br/>
-            <input name="default_fee_pct" style="width:120px;" value="0" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Subscription status:</label><br/>
-            <select name="subscription_status" style="width:220px;">
-              <option value="active">active</option>
-              <option value="suspended">suspended</option>
-              <option value="expired">expired</option>
-            </select>
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Subscription until (YYYY-MM-DD):</label><br/>
-            <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Active:</label><br/>
-            <select name="active" style="width:220px;">
-              <option value="true">true</option>
-              <option value="false">false</option>
-            </select>
-          </div>
-
-          <button type="submit">Crear cliente</button>
-          <div class="muted" id="createClientResp" style="margin-top:6px;"></div>
-        </form>
-      </div>
-
-      <div class="box">
-        <h3>Editar cliente</h3>
-        <form onsubmit="return updateClient(event)">
-          <div style="margin:6px 0;">
-            <label>Client ID:</label><br/>
-            <input name="client_id" style="width:220px;" placeholder="cliente02" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Nombre visible:</label><br/>
-            <input name="display_name" style="width:320px;" placeholder="Cliente 02" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Plan:</label><br/>
-            <select name="plan_type" style="width:220px;">
-              <option value="">(sin cambio)</option>
-              <option value="direct">direct</option>
-              <option value="marketplace_fee">marketplace_fee</option>
-              <option value="subscription">subscription</option>
-            </select>
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Fee por defecto (ej 0.03):</label><br/>
-            <input name="default_fee_pct" style="width:120px;" placeholder="0.03" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Subscription status:</label><br/>
-            <select name="subscription_status" style="width:220px;">
-              <option value="">(sin cambio)</option>
-              <option value="active">active</option>
-              <option value="suspended">suspended</option>
-              <option value="expired">expired</option>
-            </select>
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Subscription until (YYYY-MM-DD):</label><br/>
-            <input name="subscription_until" style="width:160px;" placeholder="2026-12-31" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Active:</label><br/>
-            <select name="active" style="width:220px;">
-              <option value="">(sin cambio)</option>
-              <option value="true">true</option>
-              <option value="false">false</option>
-            </select>
-          </div>
-
-          <button type="submit">Actualizar cliente</button>
-          <div class="muted" id="updateClientResp" style="margin-top:6px;"></div>
-        </form>
-      </div>
-
-      <div class="box">
-        <h3>Crear device</h3>
-        <form onsubmit="return createDevice(event)">
-          <div style="margin:6px 0;">
-            <label>Dev:</label><br/>
-            <input name="dev" style="width:220px;" placeholder="canilla01" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Cliente ID:</label><br/>
-            <input name="client_id" style="width:220px;" placeholder="cliente01" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Título:</label><br/>
-            <input name="title" style="width:320px;" placeholder="QdRink" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Precio:</label><br/>
-            <input name="unit_price" style="width:120px;" placeholder="3800" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Fee % (ej 0.03):</label><br/>
-            <input name="fee_pct" style="width:120px;" value="0" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Token mode:</label><br/>
-            <select name="token_mode" style="width:220px;">
-              <option value="main_account">main_account</option>
-              <option value="oauth_seller">oauth_seller</option>
-            </select>
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Kind:</label><br/>
-            <input name="kind" style="width:220px;" value="beer_tap" />
-          </div>
-
-          <button type="submit">Crear device</button>
-          <div class="muted" id="createResp" style="margin-top:6px;"></div>
-        </form>
-      </div>
-
-      <div class="box">
-        <h3>Editar device</h3>
-        <form onsubmit="return updateDevice(event)">
-          <div style="margin:6px 0;">
-            <label>Dev:</label><br/>
-            <input name="dev" style="width:220px;" placeholder="canilla01" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Cliente ID:</label><br/>
-            <input name="client_id" style="width:220px;" placeholder="cliente01" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Título:</label><br/>
-            <input name="title" style="width:320px;" placeholder="QdRink" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Precio:</label><br/>
-            <input name="unit_price" style="width:120px;" placeholder="3800" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Fee % (ej 0.03):</label><br/>
-            <input name="fee_pct" style="width:120px;" placeholder="0" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Token mode:</label><br/>
-            <select name="token_mode" style="width:220px;">
-              <option value="">(sin cambio)</option>
-              <option value="main_account">main_account</option>
-              <option value="oauth_seller">oauth_seller</option>
-            </select>
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Kind:</label><br/>
-            <input name="kind" style="width:220px;" placeholder="beer_tap" />
-          </div>
-
-          <div style="margin:6px 0;">
-            <label>Enabled:</label><br/>
-            <select name="enabled" style="width:220px;">
-              <option value="">(sin cambio)</option>
-              <option value="true">true</option>
-              <option value="false">false</option>
-            </select>
-          </div>
-
-          <button type="submit">Actualizar device</button>
-          <div class="muted" id="updateResp" style="margin-top:6px;"></div>
-        </form>
-      </div>
-    </div>
-
-    <div class="box">
-      <h3>Registrar equipo virgen</h3>
-      <div class="muted">Este es el mismo flujo del ESP nuevo/reset: entra a QdRink_Setup_XXXXX, el usuario pone su client_id, el nombre del device y la clave del AP local.</div>
-      <form onsubmit="return registerDevice(event)">
-        <div style="margin:6px 0;">
-          <label>Client ID:</label><br/>
-          <input name="client_id" style="width:220px;" placeholder="cliente01" />
-        </div>
-
-        <div style="margin:6px 0;">
-          <label>Dev:</label><br/>
-          <input name="dev" style="width:220px;" placeholder="canilla01" />
-        </div>
-
-        <div style="margin:6px 0;">
-          <label>AP password:</label><br/>
-          <input name="ap_password" style="width:220px;" placeholder="minimo 8 caracteres" />
-        </div>
-
-        <div style="margin:6px 0;">
-          <label>Kind:</label><br/>
-          <select name="kind" style="width:220px;">
-            <option value="beer_tap">beer_tap</option>
-            <option value="ticket">ticket</option>
-          </select>
-        </div>
-
-        <button type="submit">Registrar equipo</button>
-        <div class="muted" id="registerDeviceResp" style="margin-top:6px;"></div>
-      </form>
-    </div>
-
-    <div class="box">
-      <h3>Clients actuales</h3>
-      <table>
-        <tr>
-          <th>Client ID</th>
-          <th>Nombre</th>
-          <th>Plan</th>
-          <th>Fee default</th>
-          <th>Status</th>
-          <th>Hasta</th>
-          <th>Activo</th>
-          <th>Devices</th>
-          <th>OAuth</th>
-          <th>user_id MP</th>
-          <th>OAuth updated</th>
-          <th>Conectar</th>
-          <th>Acción</th>
-        </tr>
-        ${clientsTableRows || '<tr><td colspan="13" class="muted">No hay clients cargados.</td></tr>'}
-      </table>
-      <div class="muted" id="deleteClientResp" style="margin-top:6px;"></div>
-    </div>
-
-    <div class="box">
-      <h3>Devices actuales</h3>
-      <table>
-        <tr>
-          <th>Dev</th>
-          <th>Cliente</th>
-          <th>Título</th>
-          <th>Precio base</th>
-          <th>Último precio</th>
-          <th>Fee</th>
-          <th>Token</th>
-          <th>Enabled</th>
-          <th>Kind</th>
-          <th>OAuth cliente</th>
-          <th>Acción</th>
-        </tr>
-        ${devicesTableRows || '<tr><td colspan="11" class="muted">No hay devices cargados.</td></tr>'}
-      </table>
-      <div class="muted" id="deleteDeviceResp" style="margin-top:6px;"></div>
-    </div>
+    <div class="muted">Estado actual por dev:</div>
+    <pre class="muted">${escapeHtml(JSON.stringify(stateByDev, null, 2))}</pre>
 
     <table>
       <tr>
-        <th>Fecha/Hora</th>
-        <th>Dev</th>
-        <th>Producto</th>
-        <th>Monto</th>
-        <th>Email</th>
-        <th>Estado</th>
-        <th>Medio</th>
-        <th>payment_id</th>
-        <th>pref_id</th>
-        <th>ext_ref</th>
+        <th>Fecha/Hora</th><th>Dev</th><th>Producto</th><th>Monto</th>
+        <th>Email</th><th>Estado</th><th>Medio</th><th>payment_id</th><th>pref_id</th><th>ext_ref</th>
       </tr>
   `;
 
-  const pagosUnicos = Array.from(
-    new Map(
-      pagos.map((p) => [String(p.payment_id || ''), p])
-    ).values()
-  );
-
-  pagosUnicos.slice().reverse().forEach((p) => {
+  pagos.slice().reverse().forEach((p) => {
     html += `
       <tr>
-        <td>${escapeHtml(String(p.fechaHora || ''))}</td>
-        <td>${escapeHtml(String(p.dev || ''))}</td>
-        <td>${escapeHtml(String(p.title || ''))}</td>
-        <td>${escapeHtml(String(p.monto || ''))}</td>
-        <td>${escapeHtml(String(p.email || ''))}</td>
-        <td>${escapeHtml(String(p.estado || ''))}</td>
-        <td>${escapeHtml(String(p.metodo || ''))}</td>
-        <td>${escapeHtml(String(p.payment_id || ''))}</td>
-        <td>${escapeHtml(String(p.preference_id || ''))}</td>
-        <td>${escapeHtml(String(p.external_reference || ''))}</td>
+        <td>${escapeHtml(p.fechaHora)}</td>
+        <td>${escapeHtml(p.dev)}</td>
+        <td>${escapeHtml(p.title)}</td>
+        <td>${escapeHtml(p.monto)}</td>
+        <td>${escapeHtml(p.email)}</td>
+        <td>${escapeHtml(p.estado)}</td>
+        <td>${escapeHtml(p.metodo)}</td>
+        <td>${escapeHtml(p.payment_id)}</td>
+        <td>${escapeHtml(p.preference_id || '')}</td>
+        <td>${escapeHtml(p.external_reference || '')}</td>
       </tr>
     `;
   });
 
-  html += `
-    </table>
-
-    <script>
-      const ADMIN_KEY = new URLSearchParams(location.search).get('key') || '';
-
-      async function sendForm(ev) {
-        ev.preventDefault();
-
-        const form = ev.target;
-        const fd = new FormData(form);
-        const outId = form.getAttribute('data-out');
-
-        const body = {
-          dev: String(fd.get('dev') || '').trim(),
-          title: String(fd.get('title') || '').trim(),
-          price: Number(fd.get('price'))
-        };
-
-        const r = await fetch('/set-item', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-key': ADMIN_KEY
-          },
-          body: JSON.stringify(body)
-        });
-
-        const j = await r.json();
-        if (outId) document.getElementById(outId).textContent = JSON.stringify(j);
-
-        return false;
-      }
-
-      async function createDevice(ev) {
-        ev.preventDefault();
-
-        const fd = new FormData(ev.target); 
-
-        const body = {
-          dev: String(fd.get('dev') || '').trim(),
-          client_id: String(fd.get('client_id') || '').trim(),
-          title: String(fd.get('title') || '').trim(),
-          quantity: 1,
-          currency_id: 'ARS',
-          unit_price: Number(fd.get('unit_price')),
-          fee_pct: Number(fd.get('fee_pct') || 0),
-          token_mode: String(fd.get('token_mode') || '').trim(),
-          enabled: true,
-          kind: String(fd.get('kind') || 'generic').trim()
-        };
-
-        const r = await fetch('/admin/device/create', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-key': ADMIN_KEY
-          },
-          body: JSON.stringify(body)
-        });
-
-        const j = await r.json();
-        document.getElementById('createResp').textContent =
-          j.ok ? ('OK: ' + j.dev + ' creado. Recargá el panel.') : JSON.stringify(j);
-
-        return false;
-      }
-
-      async function updateDevice(ev) {
-        ev.preventDefault();
-
-        const fd = new FormData(ev.target);
-
-        const body = {
-          dev: String(fd.get('dev') || '').trim()
-        };
-
-        const client_id = String(fd.get('client_id') || '').trim();
-        const title = String(fd.get('title') || '').trim();
-        const unit_price_raw = String(fd.get('unit_price') || '').trim();
-        const fee_pct_raw = String(fd.get('fee_pct') || '').trim();
-        const token_mode = String(fd.get('token_mode') || '').trim();
-        const kind = String(fd.get('kind') || '').trim();
-        const enabled_raw = String(fd.get('enabled') || '').trim();
-
-        if (client_id) body.client_id = client_id;
-        if (title) body.title = title;
-        if (unit_price_raw) body.unit_price = Number(unit_price_raw);
-        if (fee_pct_raw) body.fee_pct = Number(fee_pct_raw);
-        if (token_mode) body.token_mode = token_mode;
-        if (kind) body.kind = kind;
-        if (enabled_raw === 'true') body.enabled = true;
-        if (enabled_raw === 'false') body.enabled = false;
-
-        const r = await fetch('/admin/device/update', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-key': ADMIN_KEY
-          },
-          body: JSON.stringify(body)
-        });
-
-        const j = await r.json();
-        document.getElementById('updateResp').textContent =
-          j.ok ? ('OK: ' + j.dev + ' actualizado. Recargá el panel.') : JSON.stringify(j);
-
-        return false;
-      }
-
-      async function deleteDevice(dev) {
-        if (!confirm('Eliminar device ' + dev + '?')) return false;
-
-        const r = await fetch('/admin/device/delete', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-key': ADMIN_KEY
-          },
-          body: JSON.stringify({ dev })
-        });
-
-        const j = await r.json();
-        document.getElementById('deleteDeviceResp').textContent =
-          j.ok ? ('OK: ' + j.dev + ' eliminado. Recargá el panel.') : JSON.stringify(j);
-
-        return false;
-      }
-
-      async function createClient(ev) {
-        ev.preventDefault();
-
-        const fd = new FormData(ev.target);
-        const subscriptionUntil = String(fd.get('subscription_until') || '').trim();
-        const activeRaw = String(fd.get('active') || 'true').trim();
-
-        const body = {
-          client_id: String(fd.get('client_id') || '').trim(),
-          display_name: String(fd.get('display_name') || '').trim(),
-          plan_type: String(fd.get('plan_type') || '').trim(),
-          default_fee_pct: Number(fd.get('default_fee_pct') || 0),
-          subscription_status: String(fd.get('subscription_status') || '').trim(),
-          subscription_until: subscriptionUntil || null,
-          active: activeRaw === 'true'
-        };
-
-        const r = await fetch('/admin/client/create', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-key': ADMIN_KEY
-          },
-          body: JSON.stringify(body)
-        });
-
-        const j = await r.json();
-        document.getElementById('createClientResp').textContent =
-          j.ok ? ('OK: ' + j.client_id + ' creado. Recargá el panel.') : JSON.stringify(j);
-
-        return false;
-      }
-
-      async function updateClient(ev) {
-        ev.preventDefault();
-
-        const fd = new FormData(ev.target);
-
-        const body = {
-          client_id: String(fd.get('client_id') || '').trim()
-        };
-
-        const display_name = String(fd.get('display_name') || '').trim();
-        const plan_type = String(fd.get('plan_type') || '').trim();
-        const default_fee_pct_raw = String(fd.get('default_fee_pct') || '').trim();
-        const subscription_status = String(fd.get('subscription_status') || '').trim();
-        const subscription_until_raw = String(fd.get('subscription_until') || '').trim();
-        const active_raw = String(fd.get('active') || '').trim();
-
-        if (display_name) body.display_name = display_name;
-        if (plan_type) body.plan_type = plan_type;
-        if (default_fee_pct_raw) body.default_fee_pct = Number(default_fee_pct_raw);
-        if (subscription_status) body.subscription_status = subscription_status;
-        if (subscription_until_raw) body.subscription_until = subscription_until_raw;
-        if (active_raw === 'true') body.active = true;
-        if (active_raw === 'false') body.active = false;
-
-        const r = await fetch('/admin/client/update', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-key': ADMIN_KEY
-          },
-          body: JSON.stringify(body)
-        });
-
-        const j = await r.json();
-        document.getElementById('updateClientResp').textContent =
-          j.ok ? ('OK: ' + j.client_id + ' actualizado. Recargá el panel.') : JSON.stringify(j);
-
-        return false;
-      }
-
-      async function deleteClient(client_id) {
-        if (!confirm('Eliminar client ' + client_id + '?')) return false;
-
-        const r = await fetch('/admin/client/delete', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-key': ADMIN_KEY
-          },
-          body: JSON.stringify({ client_id })
-        });
-
-        const j = await r.json();
-        document.getElementById('deleteClientResp').textContent =
-          j.ok ? ('OK: ' + j.client_id + ' eliminado. Recargá el panel.') : JSON.stringify(j);
-
-        return false;
-      }
-
-      async function registerDevice(ev) {
-        ev.preventDefault();
-
-        const fd = new FormData(ev.target);
-
-        const body = {
-          client_id: String(fd.get('client_id') || '').trim(),
-          dev: String(fd.get('dev') || '').trim(),
-          ap_password: String(fd.get('ap_password') || '').trim(),
-          kind: String(fd.get('kind') || 'beer_tap').trim()
-        };
-
-        const r = await fetch('/device/register', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(body)
-        });
-
-        const j = await r.json();
-        document.getElementById('registerDeviceResp').textContent =
-          j.ok ? ('OK: ' + j.dev + ' registrado') : JSON.stringify(j);
-
-        return false;
-      }
-    </script>
-  </body>
-  </html>
-  `;
-
+  html += `</table></body></html>`;
   res.send(html);
 });
-
 
 // ================== IPN / WEBHOOK ==================
 
@@ -2197,8 +517,6 @@ async function fetchPaymentWithToken(paymentId, token) {
 }
 
 app.post('/ipn', async (req, res) => {
-  let pid = '';
-
   try {
     console.log('📥 IPN recibida:', { query: req.query, body: req.body });
 
@@ -2220,31 +538,27 @@ app.post('/ipn', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    pid = String(paymentId);
-
-    if (processedPayments.has(pid) || processingPayments.has(pid)) {
-      console.log('ℹ️ Pago ya procesado o en proceso, ignoro:', pid);
+    if (processedPayments.has(String(paymentId))) {
+      console.log('ℹ️ Pago ya procesado, ignoro:', paymentId);
       return res.sendStatus(200);
     }
-
-    processingPayments.add(pid);
 
     // 1) intentar con tu token
     let mpRes;
     try {
-      mpRes = await fetchPaymentWithToken(pid, ACCESS_TOKEN);
+      mpRes = await fetchPaymentWithToken(paymentId, ACCESS_TOKEN);
     } catch (e) {
       // 2) fallback: intentar con tokens de vendedores guardados
       console.log('ℹ️ No pude leer pago con token marketplace, pruebo tokens vendedores...');
-      const clientIds = Object.keys(tokensByClient);
+      const devs = Object.keys(tokensByDev);
       let lastErr = e;
 
-      for (const client_id of clientIds) {
-        const tok = await getAccessTokenForClient(client_id);
+      for (const dev of devs) {
+        const tok = await getAccessTokenForDev(dev);
         if (!tok) continue;
         try {
-          mpRes = await fetchPaymentWithToken(pid, tok);
-          console.log(`✅ Leí el pago con token del client_id=${client_id}`);
+          mpRes = await fetchPaymentWithToken(paymentId, tok);
+          console.log(`✅ Leí el pago con token del dev=${dev}`);
           lastErr = null;
           break;
         } catch (ee) {
@@ -2269,46 +583,38 @@ app.post('/ipn', async (req, res) => {
     const externalRef = data.external_reference || null;
     const preference_id = data.preference_id || null;
 
-    console.log('📩 Pago recibido:', {
-      estado,
-      status_detail,
-      email,
-      monto,
-      metodo,
-      externalRef,
-      preference_id
-    });
+    console.log('📩 Pago recibido:', { estado, status_detail, email, monto, metodo, externalRef, preference_id });
 
     const dev = (externalRef ? String(externalRef).split(':')[0] : '').toLowerCase();
-    const devValido = isDeviceEnabled(dev);
+    const devValido = ALLOWED_DEVS.includes(dev);
 
     if (estado !== 'approved') {
       console.log(`⚠️ Pago NO aprobado (${estado}). detalle:`, status_detail);
-      processedPayments.add(pid);
+      processedPayments.add(String(paymentId));
       return res.sendStatus(200);
     }
 
+    // ✅ validar por externalRef O preference_id
     const st = devValido ? stateByDev[dev] : null;
     const okExt = !!(st && externalRef && externalRef === st.expectedExtRef);
     const okPref = !!(st && preference_id && preference_id === st.ultimaPreferencia);
 
     if (devValido && (okExt || okPref)) {
-      const fechaHora = nowAR();
-
       st.paidEvent = {
-        payment_id: pid,
+        payment_id: String(paymentId),
         at: Date.now(),
-        fechaHora,
         monto,
         metodo,
         email,
         extRef: externalRef,
-        title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
-        price: stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100
       };
 
+      // ✅ persistir state
       saveState(stateByDev);
 
+      processedPayments.add(String(paymentId));
+
+      const fechaHora = nowAR();
       console.log(`✅ Pago confirmado y válido para ${dev} (guardado hasta ACK)`);
 
       const registro = {
@@ -2319,28 +625,23 @@ app.post('/ipn', async (req, res) => {
         monto,
         metodo,
         descripcion,
-        payment_id: pid,
+        payment_id: String(paymentId),
         preference_id,
         external_reference: externalRef,
-        title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
+        title: ITEM_BY_DEV[dev].title,
       };
-
-      if (!pagos.some((p) => String(p.payment_id || '') === pid)) {
-        pagos.push(registro);
-      } else {
-        console.log('ℹ️ Registro ya existente en tabla, no duplico:', pid);
-      }
+      pagos.push(registro);
 
       const logMsg =
-        `🕒 ${fechaHora} | Dev: ${dev}` +
-        ` | Producto: ${(stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto')}` +
-        ` | Monto: ${monto}` +
-        ` | Pago de: ${email}` +
-        ` | Estado: ${estado}` +
-        ` | extRef: ${externalRef}` +
-        ` | pref: ${preference_id}` +
-        ` | id: ${pid}` +
-        ` | price: ${stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100}\n`;
+       `🕒 ${fechaHora} | Dev: ${dev}` +
+       ` | Producto: ${ITEM_BY_DEV[dev].title}` +
+       ` | Monto: ${monto}` +
+       ` | Pago de: ${email}` +
+       ` | Estado: ${estado}` +
+       ` | extRef: ${externalRef}` +
+       ` | pref: ${preference_id}` +
+       ` | id: ${paymentId}` +
+       ` | price: ${stateByDev[dev].lastPrice || ITEM_BY_DEV[dev].unit_price}\n`;
 
       fs.appendFileSync(PAYLOG_PATH, logMsg);
 
@@ -2351,29 +652,23 @@ app.post('/ipn', async (req, res) => {
           st.rotateScheduled = false;
         }, ROTATE_DELAY_MS);
       }
+    } else {
+      console.log('⚠️ Pago aprobado pero NO corresponde al QR vigente (o dev inválido). Ignorado.');
+      console.log('🧪 DEBUG mismatch:', {
+        dev,
+        externalRef,
+        expectedExtRef: stateByDev[dev]?.expectedExtRef,
+        preference_id,
+        ultimaPreferencia: stateByDev[dev]?.ultimaPreferencia,
+      });
 
-      processedPayments.add(pid);
-      return res.sendStatus(200);
+      processedPayments.add(String(paymentId));
     }
 
-    console.log('⚠️ Pago aprobado pero NO corresponde al QR vigente (o dev inválido). Ignorado.');
-    console.log('🧪 DEBUG mismatch:', {
-      dev,
-      externalRef,
-      expectedExtRef: stateByDev[dev]?.expectedExtRef,
-      preference_id,
-      ultimaPreferencia: stateByDev[dev]?.ultimaPreferencia,
-    });
-
-    processedPayments.add(pid);
-    return res.sendStatus(200);
+    res.sendStatus(200);
   } catch (error) {
     console.error('❌ Error en /ipn:', error.response?.data || error.message);
-    return res.sendStatus(200);
-  } finally {
-    if (pid) {
-      processingPayments.delete(pid);
-    }
+    res.sendStatus(200);
   }
 });
 
@@ -2383,28 +678,18 @@ app.listen(PORT, () => {
   console.log(`Servidor activo en http://localhost:${PORT}`);
   console.log('Generando links iniciales por dev...');
 
-  getAllowedDevs().forEach((dev) => {
-    const cfg = getDevice(dev);
-
-    if (!cfg) return;
-
-    const tokenMode = String(cfg.token_mode || '').trim();
-
-    if (tokenMode === 'main_account') {
+  ALLOWED_DEVS.forEach((dev) => {
+    // ✅ bar1/bar2/bar3 siempre generan (usan tu ACCESS_TOKEN)
+    if (dev === 'bar1' || dev === 'bar2' || dev === 'bar3') {
       recargarLinkConReintento(dev);
       return;
     }
 
-    if (tokenMode === 'oauth_seller') {
-      const client_id = String(cfg.client_id || '').trim();
-      if (!tokensByClient[client_id]?.access_token) {
-        console.log(`ℹ️ ${dev} sin OAuth de cliente: no genero link inicial.`);
-        return;
-      }
-      recargarLinkConReintento(dev);
+    // (si en el futuro agregás devs OAuth)
+    if (!tokensByDev[dev]?.access_token) {
+      console.log(`ℹ️ ${dev} sin OAuth: no genero link inicial.`);
       return;
     }
-
-    console.log(`⚠️ ${dev} con token_mode inválido: ${JSON.stringify(cfg.token_mode)}`);
+    recargarLinkConReintento(dev);
   });
 });
