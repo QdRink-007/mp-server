@@ -1533,6 +1533,8 @@ app.get('/panel', requireAdmin, (req, res) => {
     const linkedDevices = devicesEntries
       .filter(([, d]) => d?.client_id === client_id)
       .map(([dev]) => dev);
+
+    const devicesCount = String(linkedDevices.length).padStart(2, '0');
     const tok = tokensByClient[client_id] || null;
     const oauthConnected = !!tok?.access_token;
     const oauthUpdated = tok?.updated_at ? new Date(tok.updated_at).toLocaleString('es-AR') : '';
@@ -1546,6 +1548,7 @@ app.get('/panel', requireAdmin, (req, res) => {
         <td>${escapeHtml(String(cfg.subscription_status || ''))}</td>
         <td>${escapeHtml(String(cfg.subscription_until || ''))}</td>
         <td>${escapeHtml(String(cfg.active))}</td>
+        <td>${escapeHtml(devicesCount)}</td>
         <td>${escapeHtml(linkedDevices.join(', '))}</td>
         <td>${oauthConnected ? 'sí' : 'no'}</td>
         <td>${escapeHtml(String(tok?.user_id || ''))}</td>
@@ -1861,6 +1864,7 @@ app.get('/panel', requireAdmin, (req, res) => {
           <th>Status</th>
           <th>Hasta</th>
           <th>Activo</th>
+          <th>Cantidad devs</th>
           <th>Devices</th>
           <th>OAuth</th>
           <th>user_id MP</th>
