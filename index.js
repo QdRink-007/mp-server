@@ -47,19 +47,38 @@ const MARKETPLACE_FEE_PERCENT_BY_DEV = {
   bar3: 0,
   bar4: 0,
   bar5: 0,
+
+  // nuevos QTIKET de terceros
+  // poné 0 si va por suscripción mensual
+  // o por ejemplo 0.10 si querés 10% por venta
+  bar6: 0.10,
+  bar7: 0.10,
+  bar8: 0.10,
+  bar9: 0.10,
+  bar10: 0.10,
 };
 
 const MARKETPLACE_FEE_MIN = 10; // piso mínimo en pesos
 
-const ALLOWED_DEVS = ['bar1', 'bar2', 'bar3', 'bar4', 'bar5'];
+const ALLOWED_DEVS = [
+  'bar1', 'bar2', 'bar3', 'bar4', 'bar5',
+  'bar6', 'bar7', 'bar8', 'bar9', 'bar10'
+];
 
 const ITEM_BY_DEV = {
-  bar1: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 100 },
-  bar2: { title: 'Quilmes', quantity: 1, currency_id: 'ARS', unit_price: 110 },
-  bar3: { title: 'Stella Artois', quantity: 1, currency_id: 'ARS', unit_price: 120 },
+  bar1: { title: 'Quilmes',      quantity: 1, currency_id: 'ARS', unit_price: 4000 },
+  bar2: { title: 'Quilmes',      quantity: 1, currency_id: 'ARS', unit_price: 3999 },
+  bar3: { title: 'Stella Artois',quantity: 1, currency_id: 'ARS', unit_price: 6000 },
 
-  bar4: { title: 'Ticket QR', quantity: 1, currency_id: 'ARS', unit_price: 1000 },
-  bar5: { title: 'Ticket QR', quantity: 1, currency_id: 'ARS', unit_price: 1000 },
+  bar4: { title: 'Ticket QR',    quantity: 1, currency_id: 'ARS', unit_price: 1000 },
+  bar5: { title: 'Ticket QR',    quantity: 1, currency_id: 'ARS', unit_price: 1000 },
+
+  // nuevos QTIKET OAuth
+  bar6: { title: 'Ticket QR',    quantity: 1, currency_id: 'ARS', unit_price: 100 },
+  bar7: { title: 'Ticket QR',    quantity: 1, currency_id: 'ARS', unit_price: 100 },
+  bar8: { title: 'Ticket QR',    quantity: 1, currency_id: 'ARS', unit_price: 100 },
+  bar9: { title: 'Ticket QR',    quantity: 1, currency_id: 'ARS', unit_price: 100 },
+  bar10:{ title: 'Ticket QR',    quantity: 1, currency_id: 'ARS', unit_price: 100 },
 };
 
 // ================== TOKENS STORE (por dev) ==================
@@ -468,8 +487,11 @@ app.get('/panel', (req, res) => {
     <div class="box">
       <div class="muted">Conectar vendedor (tu socio) por dev:</div>
       <ul>
-        <li><a href="/connect?dev=bar2">/connect?dev=bar2</a> (bar2)</li>
-        <li><a href="/connect?dev=bar3">/connect?dev=bar3</a> (bar3)</li>
+        <li><a href="/connect?dev=bar6">/connect?dev=bar6</a> (bar6)</li>
+        <li><a href="/connect?dev=bar7">/connect?dev=bar7</a> (bar7)</li>
+        <li><a href="/connect?dev=bar8">/connect?dev=bar8</a> (bar8)</li>
+        <li><a href="/connect?dev=bar9">/connect?dev=bar9</a> (bar9)</li>
+        <li><a href="/connect?dev=bar10">/connect?dev=bar10</a> (bar10)</li>
       </ul>
       <div class="muted">Tokens guardados (resumen):</div>
       <pre class="muted">${escapeHtml(JSON.stringify(Object.fromEntries(
