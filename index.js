@@ -818,13 +818,23 @@ app.post('/set-item', requireAdmin, (req, res) => {
 
     stateByDev[dev].lastPrice = price;
     stateByDev[dev].lastTitle = title;
+
+    // invalidar QR actual y exigir reinicio manual del equipo
     stateByDev[dev].paidEvent = null;
+    stateByDev[dev].expectedExtRef = null;
+    stateByDev[dev].ultimaPreferencia = null;
+    stateByDev[dev].linkActual = null;
 
     saveState(stateByDev);
 
-    recargarLinkConReintento(dev, price, title);
-
-    res.json({ ok: true, dev, price, title });
+    res.json({
+      ok: true,
+      dev,
+      price,
+      title,
+      restart_required: true,
+      message: 'Configuración guardada. Reiniciá manualmente el equipo para generar y mostrar el nuevo QR.'
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1212,16 +1222,13 @@ app.post('/admin/device/update', requireAdmin, (req, res) => {
     stateByDev[dev].linkActual = null;
 
     saveState(stateByDev);
-    recargarLinkConReintento(
-      dev,
-      devicesData.devices[dev].unit_price,
-      devicesData.devices[dev].title
-    );
 
     res.json({
       ok: true,
       dev,
-      device: devicesData.devices[dev]
+      device: devicesData.devices[dev],
+      restart_required: true,
+      message: 'Device actualizado. Reiniciá manualmente el equipo para generar y mostrar el nuevo QR.'
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1756,8 +1763,11 @@ app.get('/panel', requireAdmin, (req, res) => {
 
           <div style="margin:6px 0;">
             <label>Kind:</label><br/>
-            <input name="kind" style="width:220px;" value="beer_tap" />
-          </div>
+            <select name="kind" style="width:220px;">
+                <option value="beer_tap">beer_tap</option>
+                <option value="ticket">ticket</option>
+              </select>
+            </div>
 
           <button type="submit">Crear device</button>
           <div class="muted" id="createResp" style="margin-top:6px;"></div>
@@ -1803,7 +1813,11 @@ app.get('/panel', requireAdmin, (req, res) => {
 
           <div style="margin:6px 0;">
             <label>Kind:</label><br/>
-            <input name="kind" style="width:220px;" placeholder="beer_tap" />
+            <select name="kind" style="width:220px;">
+              <option value="">(sin cambio)</option>
+              <option value="beer_tap">beer_tap</option>
+              <option value="ticket">ticket</option>
+            </select>
           </div>
 
           <div style="margin:6px 0;">
