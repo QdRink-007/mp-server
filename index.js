@@ -497,7 +497,15 @@ app.get('/panel', (req, res) => {
       </tr>
   `;
 
+  const seenPaymentIds = new Set();
+
   pagos.slice().reverse().forEach((p) => {
+    const pid = String(p.payment_id || '').trim();
+
+    // mostrar una sola vez cada payment_id
+    if (pid && seenPaymentIds.has(pid)) return;
+    if (pid) seenPaymentIds.add(pid);
+
     html += `
       <tr>
         <td>${escapeHtml(p.fechaHora)}</td>
