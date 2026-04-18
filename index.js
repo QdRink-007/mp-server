@@ -816,6 +816,13 @@ app.post('/set-item', requireAdmin, (req, res) => {
       return res.status(400).json({ error: 'title invalido (2..60)' });
     }
 
+    // actualizar también el device persistente
+    if (devicesData.devices[dev]) {
+      devicesData.devices[dev].title = title;
+      devicesData.devices[dev].unit_price = price;
+      saveDevices(devicesData);
+    }
+
     stateByDev[dev].lastPrice = price;
     stateByDev[dev].lastTitle = title;
 
