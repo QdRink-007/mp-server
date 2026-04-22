@@ -1,12 +1,12 @@
 // index.js – QdRink multi-BAR + OAuth Marketplace (PRODUCCION)
 // - OAuth connect por dev (bar4, bar5)
-// - Usa token del vendedor para crear preferencias 
-// - marketplace_fee para comisión
+// - Usa token del vendedor para crear QR interoperable Instore
+// - Mantiene OAuth para futuro
 // - IPN intenta leer payment con token correcto (fallback)
 // - refresh automático con refresh_token (offline_access)
 // - ✅ Persistencia en Render Disk (/var/data): tokens + state + pagos.log
 // - ✅ /nuevo-link idempotente (no regenera si hay QR vigente)
-// - ✅ IPN valida por externalRef O preference_id
+// - ✅ IPN valida principalmente por external_reference
 
 const express = require('express');
 const axios = require('axios');
@@ -26,6 +26,10 @@ const MP_CLIENT_ID = process.env.MP_CLIENT_ID;
 const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET;
 const MP_REDIRECT_URI = process.env.MP_REDIRECT_URI;
 
+// QR interoperable Instore
+const MP_COLLECTOR_ID = process.env.MP_COLLECTOR_ID;
+const MP_SPONSOR_ID = process.env.MP_SPONSOR_ID || process.env.MP_COLLECTOR_ID;
+
 const ROTATE_DELAY_MS = Number(process.env.ROTATE_DELAY_MS || 5000);
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const ADMIN_KEY = process.env.ADMIN_KEY;
@@ -35,6 +39,7 @@ const REQUIRED_ENVS = [
   'MP_CLIENT_ID',
   'MP_CLIENT_SECRET',
   'MP_REDIRECT_URI',
+  'MP_COLLECTOR_ID',
   'WEBHOOK_URL',
   'ADMIN_KEY',
 ];
@@ -418,7 +423,19 @@ const processingPayments = new Set();
 // ================== HELPERS ==================
 
 function buildUniqueExtRef(dev) {
-  return `${dev}:${Date.now()}`;
+  return `${String(dev || '').toLowerCase()}_${Date.now()}`;
+}
+
+function findDevByExternalRef(externalRef) {
+  if (!externalRef) return null;
+
+  for (const dev of Object.keys(stateByDev)) {
+    if (String(stateByDev[dev]?.expectedExtRef || '') === String(externalRef)) {
+      return dev;
+    }
+  }
+
+  return null;
 }
 
 function nowAR() {
@@ -601,7 +618,49 @@ async function getAccessTokenForDev(dev) {
   return await getAccessTokenForClient(client_id);
 }
 
-// ================== MP: CREAR PREFERENCIA ==================
+async function getCollectorIdForDev(dev) {
+  const cfg = getDevice(dev);
+  if (!cfg) return null;
+
+  const tokenMode = String(cfg.token_mode || '').trim();
+
+  if (tokenMode === 'main_account') {
+    return String(MP_COLLECTOR_ID || '').trim() || null;
+  }
+
+  if (tokenMode !== 'oauth_seller') {
+    return null;
+  }
+
+  const client_id = String(cfg.client_id || '').trim();
+  if (!client_id) return null;
+
+  await getAccessTokenForClient(client_id);
+  const userId = tokensByClient[client_id]?.user_id;
+  return userId ? String(userId).trim() : null;
+}
+
+function getExternalPosIdForDev(dev) {
+  const cfg = getDevice(dev);
+  const raw = String(cfg?.mp_external_pos_id || dev || '').trim().toLowerCase();
+  return raw || null;
+}
+
+function buildQrItemForDev(dev, item) {
+  return {
+    sku_number: String(dev || 'sku'),
+    category: 'marketplace',
+    title: String(item.title || 'Producto'),
+    description: String(item.title || 'Producto'),
+    unit_price: Number(item.unit_price || 0),
+    quantity: Number(item.quantity || 1),
+    unit_measure: 'unit',
+    total_amount: Number(item.unit_price || 0) * Number(item.quantity || 1),
+    currency_id: String(item.currency_id || 'ARS')
+  };
+}
+
+// ================== MP: CREAR QR INTEROPERABLE (INSTORE) ==================
 
 async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
   const cfg = getDevice(dev);
@@ -626,52 +685,74 @@ async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
     throw new Error(`Dev ${dev} no tiene token disponible para cobrar`);
   }
 
-  const headers = { Authorization: `Bearer ${sellerToken}` };
+  const collectorId = await getCollectorIdForDev(dev);
+  if (!collectorId) {
+    throw new Error(`Dev ${dev} no tiene collector_id disponible`);
+  }
+
+  const externalPosId = getExternalPosIdForDev(dev);
+  if (!externalPosId) {
+    throw new Error(`Dev ${dev} no tiene external_pos_id disponible`);
+  }
+
   const extRef = buildUniqueExtRef(dev);
+  const totalAmount = Number(item.unit_price || 0) * Number(item.quantity || 1);
 
-  const pct = Number(cfg.fee_pct || 0);
-
-  let fee = Math.round(item.unit_price * pct);
-  if (pct > 0) fee = Math.max(MARKETPLACE_FEE_MIN, fee);
+  const headers = {
+    Authorization: `Bearer ${sellerToken}`,
+    'Content-Type': 'application/json'
+  };
 
   const body = {
-    items: [item],
     external_reference: extRef,
+    title: String(item.title || 'Producto'),
+    description: String(item.title || 'Producto'),
     notification_url: WEBHOOK_URL,
-    ...(fee > 0 ? { marketplace_fee: fee } : {}),
+    total_amount: totalAmount,
+    items: [buildQrItemForDev(dev, item)],
+    sponsor: {
+      id: Number(MP_SPONSOR_ID)
+    },
+    cash_out: {
+      amount: 0
+    }
   };
 
   const res = await axios.post(
-    'https://api.mercadopago.com/checkout/preferences',
+    `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${encodeURIComponent(collectorId)}/pos/${encodeURIComponent(externalPosId)}/qrs`,
     body,
     { headers }
   );
 
-  const pref = res.data;
-  const prefId = pref.id || pref.preference_id;
+  const qr = res.data || {};
+  const orderId = qr.in_store_order_id || null;
+  const qrData = qr.qr_data || null;
+
+  if (!qrData) {
+    throw new Error(`Mercado Pago no devolvió qr_data para dev=${dev}`);
+  }
 
   if (!stateByDev[dev]) stateByDev[dev] = {};
 
-  stateByDev[dev].ultimaPreferencia = prefId;
-  stateByDev[dev].linkActual = pref.init_point;
+  stateByDev[dev].ultimaPreferencia = orderId;
+  stateByDev[dev].linkActual = qrData;
   stateByDev[dev].expectedExtRef = extRef;
   stateByDev[dev].lastPrice = item.unit_price;
   stateByDev[dev].lastTitle = item.title;
 
   saveState(stateByDev);
 
-  console.log(`🔄 Nuevo link generado para ${dev}:`, {
-    preference_id: prefId,
+  console.log(`🔄 Nuevo QR interoperable generado para ${dev}:`, {
+    in_store_order_id: orderId,
     external_reference: extRef,
-    link: pref.init_point,
-    price: item.unit_price,
-    marketplace_fee: fee,
+    external_pos_id: externalPosId,
+    price: item.unit_price
   });
 
   return {
-    preference_id: prefId,
+    preference_id: orderId,
     external_reference: extRef,
-    link: pref.init_point,
+    link: qrData,
     price: item.unit_price
   };
 }
@@ -686,18 +767,18 @@ function recargarLinkConReintento(dev, priceOverride, titleOverride, intento = 1
     titleOverride
   ).catch((err) => {
     console.error(
-      `❌ Error al regenerar link para ${dev} (intento ${intento}):`,
+      `❌ Error al regenerar QR para ${dev} (intento ${intento}):`,
       err.response?.data || err.message
     );
 
     if (intento < MAX_INTENTOS) {
-      console.log(`⏳ Reintentando generar link para ${dev} en ${esperaMs} ms...`);
+      console.log(`⏳ Reintentando generar QR para ${dev} en ${esperaMs} ms...`);
       setTimeout(
         () => recargarLinkConReintento(dev, priceOverride, titleOverride, intento + 1),
         esperaMs
       );
     } else {
-      console.log(`⚠️ Se agotaron reintentos para ${dev}. Se mantiene último link.`);
+      console.log(`⚠️ Se agotaron reintentos para ${dev}. Se mantiene último QR.`);
     }
   });
 }
@@ -814,13 +895,6 @@ app.post('/set-item', requireAdmin, (req, res) => {
     let title = String(req.body.title || '').trim();
     if (title.length < 2 || title.length > 60) {
       return res.status(400).json({ error: 'title invalido (2..60)' });
-    }
-
-    // actualizar también el device persistente
-    if (devicesData.devices[dev]) {
-      devicesData.devices[dev].title = title;
-      devicesData.devices[dev].unit_price = price;
-      saveDevices(devicesData);
     }
 
     stateByDev[dev].lastPrice = price;
@@ -1516,7 +1590,7 @@ app.get('/panel', requireAdmin, (req, res) => {
           <input name="price" style="width:120px;" value="${escapeHtml(String(st.lastPrice || d.unit_price || 100))}" />
         </div>
 
-        <button type="submit">Guardar y regenerar QR</button>
+        <button type="submit">Guardar y regenerar QR interoperable</button>
         <div class="muted" id="setResp_${escapeHtml(dev)}" style="margin-top:6px;"></div>
       </form>
     </div>
@@ -1605,7 +1679,7 @@ app.get('/panel', requireAdmin, (req, res) => {
         <span class="pill">Devices: ${devicesEntries.length}</span>
         <span class="pill">Devices habilitados: ${getAllowedDevs().length}</span>
       </div>
-      <div class="muted" style="margin-top:8px;">Ahora el panel ya no depende de bar4/bar5. Todo sale de clients.json y devices.json.</div>
+      <div class="muted" style="margin-top:8px;">Ahora el panel ya no depende de bar4/bar5. Todo sale de clients.json y devices.json. Para Instore, cada dev debe tener un POS en MP con external_pos_id igual al dev o al mp_external_pos_id configurado.</div>
     </div>
 
     ${deviceConfigBoxes || '<div class="box"><div class="muted">No hay devices cargados todavía.</div></div>'}
@@ -1929,7 +2003,7 @@ app.get('/panel', requireAdmin, (req, res) => {
         <th>Estado</th>
         <th>Medio</th>
         <th>payment_id</th>
-        <th>pref_id</th>
+        <th>order_id</th>
         <th>ext_ref</th>
       </tr>
   `;
@@ -2304,7 +2378,9 @@ app.post('/ipn', async (req, res) => {
       preference_id
     });
 
-    const dev = (externalRef ? String(externalRef).split(':')[0] : '').toLowerCase();
+    const devByExtRef = findDevByExternalRef(externalRef);
+    const devFallback = (externalRef ? String(externalRef).split('_')[0] : '').toLowerCase();
+    const dev = (devByExtRef || devFallback || '').toLowerCase();
     const devValido = isDeviceEnabled(dev);
 
     if (estado !== 'approved') {
@@ -2345,7 +2421,7 @@ app.post('/ipn', async (req, res) => {
         metodo,
         descripcion,
         payment_id: pid,
-        preference_id,
+        preference_id: st?.ultimaPreferencia || preference_id || null,
         external_reference: externalRef,
         title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
       };
@@ -2363,7 +2439,7 @@ app.post('/ipn', async (req, res) => {
         ` | Pago de: ${email}` +
         ` | Estado: ${estado}` +
         ` | extRef: ${externalRef}` +
-        ` | pref: ${preference_id}` +
+        ` | order: ${st?.ultimaPreferencia || preference_id || ''}` +
         ` | id: ${pid}` +
         ` | price: ${stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100}\n`;
 
@@ -2386,6 +2462,7 @@ app.post('/ipn', async (req, res) => {
       dev,
       externalRef,
       expectedExtRef: stateByDev[dev]?.expectedExtRef,
+      order_id: st?.ultimaPreferencia || null,
       preference_id,
       ultimaPreferencia: stateByDev[dev]?.ultimaPreferencia,
     });
@@ -2406,7 +2483,7 @@ app.post('/ipn', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Servidor activo en http://localhost:${PORT}`);
-  console.log('Generando links iniciales por dev...');
+  console.log('Generando QRs interoperables iniciales por dev...');
 
   getAllowedDevs().forEach((dev) => {
     const cfg = getDevice(dev);
