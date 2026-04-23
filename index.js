@@ -1069,11 +1069,11 @@ app.post('/set-item', requireAdmin, (req, res) => {
 
     res.json({
       ok: true,
+      client_id,
       dev,
-      price,
-      title,
-      restart_required: true,
-      message: 'Configuración guardada. Reiniciá manualmente el equipo para generar y mostrar el nuevo QR.'
+      device_key,
+      ap_password,
+      kind
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
