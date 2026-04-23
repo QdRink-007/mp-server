@@ -2336,13 +2336,187 @@ async function fetchPaymentWithToken(paymentId, token) {
   return axios.get(url, { headers });
 }
 
+function buildProcessedKey(prefix, id) {
+  return `${prefix}:${String(id || '').trim()}`;
+}
+
+function registerPaidEventForDev(dev, payload) {
+  const st = stateByDev[dev];
+  if (!st) return false;
+
+  const fechaHora = nowAR();
+  const paymentId = String(payload.payment_id || payload.order_id || '');
+  const orderId = payload.order_id ? String(payload.order_id) : null;
+  const amount = Number(payload.monto || 0);
+  const method = String(payload.metodo || 'qr');
+  const email = String(payload.email || 'sin email');
+  const externalRef = payload.external_reference || null;
+  const descripcion = payload.descripcion || null;
+  const estado = String(payload.estado || 'processed');
+  const status_detail = payload.status_detail || null;
+
+  st.paidEvent = {
+    payment_id: paymentId,
+    order_id: orderId,
+    at: Date.now(),
+    fechaHora,
+    monto: amount,
+    metodo: method,
+    email,
+    extRef: externalRef,
+    title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
+    price: stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100
+  };
+
+  saveState(stateByDev);
+
+  console.log(`✅ Pago confirmado y válido para ${dev} (guardado hasta ACK)`);
+
+  const registro = {
+    fechaHora,
+    dev,
+    email,
+    estado,
+    monto: amount,
+    metodo: method,
+    descripcion,
+    payment_id: paymentId,
+    preference_id: orderId || st?.ultimaPreferencia || null,
+    external_reference: externalRef,
+    title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
+  };
+
+  if (!pagos.some((p) => String(p.payment_id || '') === paymentId)) {
+    pagos.push(registro);
+  } else {
+    console.log('ℹ️ Registro ya existente en tabla, no duplico:', paymentId);
+  }
+
+  const logMsg =
+    `🕒 ${fechaHora} | Dev: ${dev}` +
+    ` | Producto: ${(stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto')}` +
+    ` | Monto: ${amount}` +
+    ` | Pago de: ${email}` +
+    ` | Estado: ${estado}` +
+    (status_detail ? `/${status_detail}` : '') +
+    ` | extRef: ${externalRef}` +
+    ` | order: ${orderId || st?.ultimaPreferencia || ''}` +
+    ` | id: ${paymentId}` +
+    ` | price: ${stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100}\n`;
+
+  fs.appendFileSync(PAYLOG_PATH, logMsg);
+
+  if (!st.rotateScheduled) {
+    st.rotateScheduled = true;
+    setTimeout(() => {
+      recargarLinkConReintento(dev);
+      st.rotateScheduled = false;
+    }, ROTATE_DELAY_MS);
+  }
+
+  return true;
+}
+
 app.post('/ipn', async (req, res) => {
-  let pid = '';
+  let processedKey = '';
 
   try {
     console.log('📥 IPN recibida:', { query: req.query, body: req.body });
 
-    const topic = req.query.topic || req.query.type || req.body.topic || req.body.type;
+    const topic = String(req.query.topic || req.query.type || req.body.topic || req.body.type || '').trim();
+    const action = String(req.body.action || req.query.action || '').trim();
+
+    // ============================================================
+    // NUEVO FLUJO QR / ORDERS
+    // ============================================================
+    if (topic === 'order' || action.startsWith('order.')) {
+      const order = req.body?.data || {};
+      const orderId = String(order.id || req.query['data.id'] || req.body.id || '').trim();
+      const externalRef = order.external_reference || null;
+      const payment = Array.isArray(order?.transactions?.payments) ? (order.transactions.payments[0] || null) : null;
+      const paymentId = String(payment?.id || orderId || '').trim();
+
+      if (!orderId && !paymentId) {
+        console.log('⚠️ Webhook order sin id utilizable.');
+        return res.sendStatus(200);
+      }
+
+      processedKey = buildProcessedKey('order', orderId || paymentId);
+
+      if (processedPayments.has(processedKey) || processingPayments.has(processedKey)) {
+        console.log('ℹ️ Order ya procesada o en proceso, ignoro:', processedKey);
+        return res.sendStatus(200);
+      }
+
+      processingPayments.add(processedKey);
+
+      const orderStatus = String(order.status || '').trim().toLowerCase();
+      const orderStatusDetail = String(order.status_detail || '').trim().toLowerCase();
+      const paymentStatus = String(payment?.status || '').trim().toLowerCase();
+      const paymentStatusDetail = String(payment?.status_detail || '').trim().toLowerCase();
+
+      const approved = (
+        action === 'order.processed' ||
+        orderStatus === 'processed' ||
+        paymentStatus === 'processed' ||
+        orderStatusDetail === 'accredited' ||
+        paymentStatusDetail === 'accredited'
+      );
+
+      if (!approved) {
+        console.log('ℹ️ Order recibida pero no procesada todavía:', {
+          action,
+          orderStatus,
+          orderStatusDetail,
+          paymentStatus,
+          paymentStatusDetail,
+          orderId,
+        });
+        processedPayments.add(processedKey);
+        return res.sendStatus(200);
+      }
+
+      const devByExtRef = findDevByExternalRef(externalRef);
+      const devFallback = (externalRef ? String(externalRef).split('_')[0] : '').toLowerCase();
+      const dev = (devByExtRef || devFallback || '').toLowerCase();
+      const devValido = isDeviceEnabled(dev);
+      const st = devValido ? stateByDev[dev] : null;
+      const okExt = !!(st && externalRef && externalRef === st.expectedExtRef);
+      const okOrder = !!(st && orderId && String(orderId) === String(st.ultimaPreferencia || ''));
+
+      if (devValido && (okExt || okOrder)) {
+        registerPaidEventForDev(dev, {
+          payment_id: paymentId || orderId,
+          order_id: orderId,
+          monto: Number(payment?.paid_amount ?? payment?.amount ?? order.total_paid_amount ?? order.total_amount ?? 0),
+          metodo: payment?.payment_method?.id || 'qr',
+          email: 'sin email',
+          external_reference: externalRef,
+          descripcion: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
+          estado: orderStatus || paymentStatus || 'processed',
+          status_detail: orderStatusDetail || paymentStatusDetail || null,
+        });
+
+        processedPayments.add(processedKey);
+        return res.sendStatus(200);
+      }
+
+      console.log('⚠️ Order procesada pero NO corresponde al QR vigente (o dev inválido). Ignorada.');
+      console.log('🧪 DEBUG mismatch order:', {
+        dev,
+        externalRef,
+        expectedExtRef: stateByDev[dev]?.expectedExtRef,
+        orderId,
+        ultimaPreferencia: stateByDev[dev]?.ultimaPreferencia,
+      });
+
+      processedPayments.add(processedKey);
+      return res.sendStatus(200);
+    }
+
+    // ============================================================
+    // FLUJO VIEJO / PAYMENT (compatibilidad)
+    // ============================================================
     if (topic && topic !== 'payment') {
       console.log('ℹ️ IPN no-payment, se ignora:', topic);
       return res.sendStatus(200);
@@ -2360,21 +2534,19 @@ app.post('/ipn', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    pid = String(paymentId);
+    processedKey = buildProcessedKey('payment', paymentId);
 
-    if (processedPayments.has(pid) || processingPayments.has(pid)) {
-      console.log('ℹ️ Pago ya procesado o en proceso, ignoro:', pid);
+    if (processedPayments.has(processedKey) || processingPayments.has(processedKey)) {
+      console.log('ℹ️ Pago ya procesado o en proceso, ignoro:', processedKey);
       return res.sendStatus(200);
     }
 
-    processingPayments.add(pid);
+    processingPayments.add(processedKey);
 
-    // 1) intentar con tu token
     let mpRes;
     try {
-      mpRes = await fetchPaymentWithToken(pid, ACCESS_TOKEN);
+      mpRes = await fetchPaymentWithToken(paymentId, ACCESS_TOKEN);
     } catch (e) {
-      // 2) fallback: intentar con tokens de vendedores guardados
       console.log('ℹ️ No pude leer pago con token marketplace, pruebo tokens vendedores...');
       const clientIds = Object.keys(tokensByClient);
       let lastErr = e;
@@ -2383,7 +2555,7 @@ app.post('/ipn', async (req, res) => {
         const tok = await getAccessTokenForClient(client_id);
         if (!tok) continue;
         try {
-          mpRes = await fetchPaymentWithToken(pid, tok);
+          mpRes = await fetchPaymentWithToken(paymentId, tok);
           console.log(`✅ Leí el pago con token del client_id=${client_id}`);
           lastErr = null;
           break;
@@ -2426,7 +2598,7 @@ app.post('/ipn', async (req, res) => {
 
     if (estado !== 'approved') {
       console.log(`⚠️ Pago NO aprobado (${estado}). detalle:`, status_detail);
-      processedPayments.add(pid);
+      processedPayments.add(processedKey);
       return res.sendStatus(200);
     }
 
@@ -2435,71 +2607,24 @@ app.post('/ipn', async (req, res) => {
     const okPref = !!(st && preference_id && preference_id === st.ultimaPreferencia);
 
     if (devValido && (okExt || okPref)) {
-      const fechaHora = nowAR();
-
-      st.paidEvent = {
-        payment_id: pid,
-        at: Date.now(),
-        fechaHora,
+      registerPaidEventForDev(dev, {
+        payment_id: String(paymentId),
+        order_id: preference_id || st?.ultimaPreferencia || null,
         monto,
         metodo,
         email,
-        extRef: externalRef,
-        title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
-        price: stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100
-      };
-
-      saveState(stateByDev);
-
-      console.log(`✅ Pago confirmado y válido para ${dev} (guardado hasta ACK)`);
-
-      const registro = {
-        fechaHora,
-        dev,
-        email,
-        estado,
-        monto,
-        metodo,
-        descripcion,
-        payment_id: pid,
-        preference_id: st?.ultimaPreferencia || preference_id || null,
         external_reference: externalRef,
-        title: stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto',
-      };
+        descripcion,
+        estado,
+        status_detail,
+      });
 
-      if (!pagos.some((p) => String(p.payment_id || '') === pid)) {
-        pagos.push(registro);
-      } else {
-        console.log('ℹ️ Registro ya existente en tabla, no duplico:', pid);
-      }
-
-      const logMsg =
-        `🕒 ${fechaHora} | Dev: ${dev}` +
-        ` | Producto: ${(stateByDev[dev].lastTitle || getDevice(dev)?.title || 'Producto')}` +
-        ` | Monto: ${monto}` +
-        ` | Pago de: ${email}` +
-        ` | Estado: ${estado}` +
-        ` | extRef: ${externalRef}` +
-        ` | order: ${st?.ultimaPreferencia || preference_id || ''}` +
-        ` | id: ${pid}` +
-        ` | price: ${stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100}\n`;
-
-      fs.appendFileSync(PAYLOG_PATH, logMsg);
-
-      if (!st.rotateScheduled) {
-        st.rotateScheduled = true;
-        setTimeout(() => {
-          recargarLinkConReintento(dev);
-          st.rotateScheduled = false;
-        }, ROTATE_DELAY_MS);
-      }
-
-      processedPayments.add(pid);
+      processedPayments.add(processedKey);
       return res.sendStatus(200);
     }
 
     console.log('⚠️ Pago aprobado pero NO corresponde al QR vigente (o dev inválido). Ignorado.');
-    console.log('🧪 DEBUG mismatch:', {
+    console.log('🧪 DEBUG mismatch payment:', {
       dev,
       externalRef,
       expectedExtRef: stateByDev[dev]?.expectedExtRef,
@@ -2508,14 +2633,14 @@ app.post('/ipn', async (req, res) => {
       ultimaPreferencia: stateByDev[dev]?.ultimaPreferencia,
     });
 
-    processedPayments.add(pid);
+    processedPayments.add(processedKey);
     return res.sendStatus(200);
   } catch (error) {
     console.error('❌ Error en /ipn:', error.response?.data || error.message);
     return res.sendStatus(200);
   } finally {
-    if (pid) {
-      processingPayments.delete(pid);
+    if (processedKey) {
+      processingPayments.delete(processedKey);
     }
   }
 });
