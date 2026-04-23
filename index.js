@@ -1,6 +1,6 @@
 // index.js – QdRink multi-BAR + OAuth Marketplace (PRODUCCION)
 // - OAuth connect por dev (bar4, bar5)
-// - Usa token del vendedor para crear QR interoperable Instore
+// - Usa token del vendedor para crear QR interoperable con API Orders v1/orders
 // - Mantiene OAuth para futuro
 // - IPN intenta leer payment con token correcto (fallback)
 // - refresh automático con refresh_token (offline_access)
@@ -10,6 +10,7 @@
 
 const express = require('express');
 const axios = require('axios');
+const crypto = require('crypto');
 const bodyParser = require('body-parser');
 const fs = require('fs');
 const path = require('path');
@@ -26,9 +27,10 @@ const MP_CLIENT_ID = process.env.MP_CLIENT_ID;
 const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET;
 const MP_REDIRECT_URI = process.env.MP_REDIRECT_URI;
 
-// QR interoperable Instore
+// QR interoperable / API Orders
 const MP_COLLECTOR_ID = process.env.MP_COLLECTOR_ID;
-const MP_SPONSOR_ID = process.env.MP_SPONSOR_ID || process.env.MP_COLLECTOR_ID;
+const MP_SPONSOR_ID = process.env.MP_SPONSOR_ID || '';
+const MP_QR_MODE = String(process.env.MP_QR_MODE || 'dynamic').trim().toLowerCase();
 
 const ROTATE_DELAY_MS = Number(process.env.ROTATE_DELAY_MS || 5000);
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
@@ -646,21 +648,47 @@ function getExternalPosIdForDev(dev) {
   return raw || null;
 }
 
-function buildQrItemForDev(dev, item) {
+function moneyToMpString(value) {
+  const n = Number(value || 0);
+  return n.toFixed(2);
+}
+
+function buildQrItemForDev(dev, item, cfg) {
   return {
-    sku_number: String(dev || 'sku'),
-    category: 'marketplace',
     title: String(item.title || 'Producto'),
-    description: String(item.title || 'Producto'),
-    unit_price: Number(item.unit_price || 0),
+    unit_price: moneyToMpString(item.unit_price || 0),
     quantity: Number(item.quantity || 1),
     unit_measure: 'unit',
-    total_amount: Number(item.unit_price || 0) * Number(item.quantity || 1),
-    currency_id: String(item.currency_id || 'ARS')
+    external_code: String(dev || 'item'),
+    external_categories: [
+      {
+        id: String(cfg?.kind || 'generic')
+      }
+    ]
   };
 }
 
-// ================== MP: CREAR QR INTEROPERABLE (INSTORE) ==================
+function buildIdempotencyKey(dev, extRef) {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `${String(dev || 'dev')}-${String(extRef || Date.now())}-${Date.now()}`;
+}
+
+function buildOptionalIntegrationData() {
+  const collectorId = String(MP_COLLECTOR_ID || '').trim();
+  const sponsorId = String(MP_SPONSOR_ID || '').trim();
+
+  if (!sponsorId || sponsorId === collectorId) {
+    return undefined;
+  }
+
+  return {
+    sponsor: {
+      id: sponsorId
+    }
+  };
+}
+
+// ================== MP: CREAR QR INTEROPERABLE (API ORDERS) ==================
 
 async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
   const cfg = getDevice(dev);
@@ -685,11 +713,6 @@ async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
     throw new Error(`Dev ${dev} no tiene token disponible para cobrar`);
   }
 
-  const collectorId = await getCollectorIdForDev(dev);
-  if (!collectorId) {
-    throw new Error(`Dev ${dev} no tiene collector_id disponible`);
-  }
-
   const externalPosId = getExternalPosIdForDev(dev);
   if (!externalPosId) {
     throw new Error(`Dev ${dev} no tiene external_pos_id disponible`);
@@ -697,39 +720,52 @@ async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
 
   const extRef = buildUniqueExtRef(dev);
   const totalAmount = Number(item.unit_price || 0) * Number(item.quantity || 1);
+  const idempotencyKey = buildIdempotencyKey(dev, extRef);
+  const integrationData = buildOptionalIntegrationData();
 
   const headers = {
     Authorization: `Bearer ${sellerToken}`,
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
+    'X-Idempotency-Key': idempotencyKey
   };
 
   const body = {
+    type: 'qr',
     external_reference: extRef,
-    title: String(item.title || 'Producto'),
     description: String(item.title || 'Producto'),
-    notification_url: WEBHOOK_URL,
-    total_amount: totalAmount,
-    items: [buildQrItemForDev(dev, item)],
-    sponsor: {
-      id: Number(MP_SPONSOR_ID)
+    total_amount: moneyToMpString(totalAmount),
+    config: {
+      qr: {
+        external_pos_id: externalPosId,
+        mode: MP_QR_MODE === 'static' ? 'static' : 'dynamic'
+      }
     },
-    cash_out: {
-      amount: 0
-    }
+    transactions: {
+      payments: [
+        {
+          amount: moneyToMpString(totalAmount)
+        }
+      ]
+    },
+    items: [buildQrItemForDev(dev, item, cfg)]
   };
 
+  if (integrationData) {
+    body.integration_data = integrationData;
+  }
+
   const res = await axios.post(
-    `https://api.mercadopago.com/instore/orders/qr/seller/collectors/${encodeURIComponent(collectorId)}/pos/${encodeURIComponent(externalPosId)}/qrs`,
+    'https://api.mercadopago.com/v1/orders',
     body,
     { headers }
   );
 
-  const qr = res.data || {};
-  const orderId = qr.in_store_order_id || null;
-  const qrData = qr.qr_data || null;
+  const order = res.data || {};
+  const orderId = order.id || null;
+  const qrData = order.type_response?.qr_data || null;
 
   if (!qrData) {
-    throw new Error(`Mercado Pago no devolvió qr_data para dev=${dev}`);
+    throw new Error(`Mercado Pago no devolvió type_response.qr_data para dev=${dev}`);
   }
 
   if (!stateByDev[dev]) stateByDev[dev] = {};
@@ -743,9 +779,10 @@ async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
   saveState(stateByDev);
 
   console.log(`🔄 Nuevo QR interoperable generado para ${dev}:`, {
-    in_store_order_id: orderId,
+    order_id: orderId,
     external_reference: extRef,
     external_pos_id: externalPosId,
+    qr_mode: body.config.qr.mode,
     price: item.unit_price
   });
 
@@ -849,8 +886,12 @@ app.get('/nuevo-link', async (req, res) => {
       reused: false,
     });
   } catch (error) {
-    console.error('❌ Error en /nuevo-link:', error.response?.data || error.message);
-    res.status(500).json({ error: String(error.message || 'no se pudo generar link') });
+    const mpError = error.response?.data || null;
+    console.error('❌ Error en /nuevo-link:', mpError || error.message);
+    res.status(500).json({
+      error: String(error.message || 'no se pudo generar link'),
+      mp_error: mpError
+    });
   }
 });
 
