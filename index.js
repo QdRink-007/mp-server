@@ -1069,11 +1069,11 @@ app.post('/set-item', requireAdmin, (req, res) => {
 
     res.json({
       ok: true,
-      client_id,
       dev,
-      device_key,
-      ap_password,
-      kind
+      price,
+      title,
+      restart_required: true,
+      message: 'Configuración guardada. Reiniciá manualmente el equipo para generar y mostrar el nuevo QR.'
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1265,8 +1265,12 @@ app.post('/device/register', async (req, res) => {
     }
 
     const defaultFee = Number(client.default_fee_pct || 0);
-    const inferredTokenMode =
-      client.plan_type === 'direct' ? 'main_account' : 'oauth_seller';
+
+    // V6.2:
+    // En el alta desde equipo virgen usamos siempre la cuenta principal para poder
+    // crear el POS aunque el cliente todavía no tenga OAuth conectado.
+    // Más adelante se puede extender con un modo opcional para crear POS bajo OAuth.
+    const inferredTokenMode = 'main_account';
 
     const device_key =
       'dk_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
@@ -1318,9 +1322,7 @@ app.post('/device/register', async (req, res) => {
       dev,
       device_key,
       ap_password,
-      kind,
-      pos: posInfo,
-      message: 'Device virgen registrado y POS creado correctamente'
+      kind
     });
   } catch (e) {
     const mpError = e.response?.data || null;
