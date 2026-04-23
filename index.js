@@ -31,6 +31,9 @@ const MP_REDIRECT_URI = process.env.MP_REDIRECT_URI;
 const MP_COLLECTOR_ID = process.env.MP_COLLECTOR_ID;
 const MP_SPONSOR_ID = process.env.MP_SPONSOR_ID || '';
 const MP_QR_MODE = String(process.env.MP_QR_MODE || 'dynamic').trim().toLowerCase();
+const MP_STORE_ID = process.env.MP_STORE_ID || '';
+const MP_STORE_EXTERNAL_ID = process.env.MP_STORE_EXTERNAL_ID || '';
+const MP_POS_CATEGORY = Number(process.env.MP_POS_CATEGORY || 621102);
 
 const ROTATE_DELAY_MS = Number(process.env.ROTATE_DELAY_MS || 5000);
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
@@ -688,6 +691,121 @@ function buildOptionalIntegrationData() {
   };
 }
 
+function buildPosExternalIdFromDev(dev) {
+  return String(dev || '').trim().toLowerCase();
+}
+
+function validateMpPosExternalIdOrThrow(externalId) {
+  if (!/^[a-zA-Z0-9]{3,40}$/.test(String(externalId || ''))) {
+    throw new Error('El dev para auto-POS debe ser alfanumérico simple (3..40, sin guiones ni guion bajo)');
+  }
+}
+
+function buildPosDisplayName(kind, title, dev) {
+  const basePrefix = String(kind || '').trim() === 'ticket' ? 'QTIKET' : 'QDRINK';
+  const rawTitle = String(title || '').trim().toUpperCase();
+  const rawDev = String(dev || '').trim().toUpperCase();
+  let name = `${basePrefix} ${rawDev}`.trim();
+
+  if (!name || name.length < 3) {
+    name = `${basePrefix} POS`;
+  }
+
+  if (name.length > 45) {
+    name = name.slice(0, 45);
+  }
+
+  return name;
+}
+
+async function resolvePosProvisionContext({ client_id, token_mode }) {
+  const tokenMode = String(token_mode || '').trim();
+
+  if (tokenMode === 'main_account') {
+    const storeId = Number(MP_STORE_ID || 0);
+    const externalStoreId = String(MP_STORE_EXTERNAL_ID || '').trim();
+
+    if (!storeId || !externalStoreId) {
+      throw new Error('Faltan MP_STORE_ID y/o MP_STORE_EXTERNAL_ID en Render para auto-crear POS');
+    }
+
+    return {
+      accessToken: ACCESS_TOKEN,
+      collectorId: String(MP_COLLECTOR_ID || '').trim(),
+      storeId,
+      externalStoreId,
+    };
+  }
+
+  if (tokenMode !== 'oauth_seller') {
+    throw new Error(`token_mode inválido para auto-POS: ${JSON.stringify(tokenMode)}`);
+  }
+
+  const client = getClient(client_id);
+  if (!client) {
+    throw new Error(`cliente inexistente para auto-POS: ${client_id}`);
+  }
+
+  const accessToken = await getAccessTokenForClient(client_id);
+  if (!accessToken) {
+    throw new Error(`cliente ${client_id} sin OAuth conectado: no se pudo auto-crear POS`);
+  }
+
+  const collectorId = tokensByClient[client_id]?.user_id ? String(tokensByClient[client_id].user_id).trim() : '';
+  const storeId = Number(client.mp_store_id || 0);
+  const externalStoreId = String(client.mp_store_external_id || '').trim();
+
+  if (!collectorId) {
+    throw new Error(`cliente ${client_id} sin user_id OAuth: no se pudo auto-crear POS`);
+  }
+
+  if (!storeId || !externalStoreId) {
+    throw new Error(`cliente ${client_id} sin mp_store_id/mp_store_external_id: cargalos antes de auto-crear POS`);
+  }
+
+  return {
+    accessToken,
+    collectorId,
+    storeId,
+    externalStoreId,
+  };
+}
+
+async function createPosForNewDevice({ dev, title, kind, client_id, token_mode }) {
+  const externalPosId = buildPosExternalIdFromDev(dev);
+  validateMpPosExternalIdOrThrow(externalPosId);
+
+  const ctx = await resolvePosProvisionContext({ client_id, token_mode });
+
+  const body = {
+    name: buildPosDisplayName(kind, title, dev),
+    fixed_amount: true,
+    category: MP_POS_CATEGORY,
+    store_id: ctx.storeId,
+    external_store_id: ctx.externalStoreId,
+    external_id: externalPosId,
+  };
+
+  const headers = {
+    Authorization: `Bearer ${ctx.accessToken}`,
+    'Content-Type': 'application/json',
+  };
+
+  const res = await axios.post('https://api.mercadopago.com/pos', body, { headers });
+  const pos = res.data || {};
+
+  return {
+    id: pos.id || null,
+    name: pos.name || body.name,
+    external_id: pos.external_id || externalPosId,
+    store_id: pos.store_id || ctx.storeId,
+    external_store_id: pos.external_store_id || ctx.externalStoreId,
+    status: pos.status || null,
+    user_id: pos.user_id || ctx.collectorId || null,
+    qr_code: pos.qr_code || null,
+  };
+}
+
 // ================== MP: CREAR QR INTEROPERABLE (API ORDERS) ==================
 
 async function generarNuevoLinkParaDev(dev, priceOverride, titleOverride) {
@@ -983,7 +1101,7 @@ app.get('/admin/devices', requireAdmin, (req, res) => {
   }
 });
 
-app.post('/admin/device/create', requireAdmin, (req, res) => {
+app.post('/admin/device/create', requireAdmin, async (req, res) => {
   try {
     const dev = String(req.body.dev || '').trim().toLowerCase();
     const client_id = String(req.body.client_id || '').trim();
@@ -1034,6 +1152,19 @@ app.post('/admin/device/create', requireAdmin, (req, res) => {
       return res.status(400).json({ error: 'ese dev ya existe' });
     }
 
+    const client = getClient(client_id);
+    if (!client) {
+      return res.status(404).json({ error: 'cliente inexistente' });
+    }
+
+    const posInfo = await createPosForNewDevice({
+      dev,
+      title,
+      kind,
+      client_id,
+      token_mode,
+    });
+
     const device_key =
       String(req.body.device_key || '').trim() ||
       ('dk_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36));
@@ -1048,7 +1179,14 @@ app.post('/admin/device/create', requireAdmin, (req, res) => {
       token_mode,
       enabled,
       kind,
-      device_key
+      device_key,
+      mp_pos_id: posInfo.id,
+      mp_external_pos_id: posInfo.external_id,
+      mp_store_id: posInfo.store_id,
+      mp_external_store_id: posInfo.external_store_id,
+      mp_pos_status: posInfo.status,
+      mp_user_id: posInfo.user_id,
+      pos_auto_created: true,
     };
 
     saveDevices(devicesData);
@@ -1069,10 +1207,14 @@ app.post('/admin/device/create', requireAdmin, (req, res) => {
     res.json({
       ok: true,
       dev,
-      device: devicesData.devices[dev]
+      device: devicesData.devices[dev],
+      pos: posInfo,
+      message: 'Device y POS creados correctamente'
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    const mpError = e.response?.data || null;
+    console.error('❌ Error en /admin/device/create:', mpError || e.message);
+    res.status(500).json({ error: e.message, mp_error: mpError });
   }
 });
 
@@ -2135,7 +2277,7 @@ app.get('/panel', requireAdmin, (req, res) => {
 
         const j = await r.json();
         document.getElementById('createResp').textContent =
-          j.ok ? ('OK: ' + j.dev + ' creado. Recargá el panel.') : JSON.stringify(j);
+          j.ok ? ('OK: ' + j.dev + ' creado + POS MP ' + (j.pos?.external_id || '') + '. Recargá el panel.') : JSON.stringify(j);
 
         return false;
       }
