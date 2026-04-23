@@ -1218,7 +1218,7 @@ app.post('/admin/device/create', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/device/register', (req, res) => {
+app.post('/device/register', async (req, res) => {
   try {
     const client_id = String(req.body.client_id || '').trim();
     const dev = String(req.body.dev || '').trim().toLowerCase();
@@ -1271,9 +1271,19 @@ app.post('/device/register', (req, res) => {
     const device_key =
       'dk_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
 
+    const deviceTitle = kind === 'ticket' ? 'Qtiket' : 'QdRink';
+
+    const posInfo = await createPosForNewDevice({
+      dev,
+      title: deviceTitle,
+      kind,
+      client_id,
+      token_mode: inferredTokenMode,
+    });
+
     devicesData.devices[dev] = {
       client_id,
-      title: kind === 'ticket' ? 'Qtiket' : 'QdRink',
+      title: deviceTitle,
       quantity: 1,
       currency_id: 'ARS',
       unit_price: 1000,
@@ -1281,7 +1291,12 @@ app.post('/device/register', (req, res) => {
       token_mode: inferredTokenMode,
       enabled: true,
       kind,
-      device_key
+      device_key,
+      mp_pos_id: posInfo.id,
+      mp_external_pos_id: posInfo.external_id,
+      mp_store_id: posInfo.store_id,
+      mp_external_store_id: posInfo.external_store_id,
+      mp_user_id: posInfo.user_id,
     };
 
     saveDevices(devicesData);
@@ -1303,10 +1318,14 @@ app.post('/device/register', (req, res) => {
       dev,
       device_key,
       ap_password,
-      kind
+      kind,
+      pos: posInfo,
+      message: 'Device virgen registrado y POS creado correctamente'
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    const mpError = e.response?.data || null;
+    console.error('❌ Error en /device/register:', mpError || e.message);
+    res.status(500).json({ error: e.message, mp_error: mpError });
   }
 });
 
