@@ -2531,9 +2531,16 @@ function registerPaidEventForDev(dev, payload) {
     price: stateByDev[dev].lastPrice || getDevice(dev)?.unit_price || 100
   };
 
+  // ✅ QR one-shot: el QR vigente queda invalidado apenas se confirma el primer pago válido.
+  // No se regenera por tiempo; el ESP pedirá un nuevo QR después de servir/imprimir.
+  st.expectedExtRef = null;
+  st.ultimaPreferencia = null;
+  st.linkActual = null;
+  st.rotateScheduled = false;
+
   saveState(stateByDev);
 
-  console.log(`✅ Pago confirmado y válido para ${dev} (guardado hasta ACK)`);
+  console.log(`✅ Pago confirmado, QR invalidado y evento guardado hasta ACK para ${dev}`);
 
   const registro = {
     fechaHora,
@@ -2569,13 +2576,8 @@ function registerPaidEventForDev(dev, payload) {
 
   fs.appendFileSync(PAYLOG_PATH, logMsg);
 
-  if (!st.rotateScheduled) {
-    st.rotateScheduled = true;
-    setTimeout(() => {
-      recargarLinkConReintento(dev);
-      st.rotateScheduled = false;
-    }, ROTATE_DELAY_MS);
-  }
+  // ✅ No regenerar QR automáticamente por tiempo.
+  // El próximo QR lo solicita el ESP cuando corresponda.
 
   return true;
 }
