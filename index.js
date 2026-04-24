@@ -7,6 +7,7 @@
 // - ✅ Persistencia en Render Disk (/var/data): tokens + state + pagos.log
 // - ✅ /nuevo-link idempotente (no regenera si hay QR vigente)
 // - ✅ IPN valida principalmente por external_reference
+// - ✅ V6.4: si Mercado Pago avisa order.expired, invalida y regenera QR
 
 const express = require('express');
 const axios = require('axios');
@@ -412,6 +413,7 @@ getAllowedDevs().forEach((dev) => {
     expectedExtRef: stateByDev[dev].expectedExtRef ?? null,
     ultimaPreferencia: stateByDev[dev].ultimaPreferencia ?? null,
     linkActual: stateByDev[dev].linkActual ?? null,
+    qrRefreshEvent: stateByDev[dev].qrRefreshEvent ?? null,
     rotateScheduled: false,
     lastPrice: Number(stateByDev[dev].lastPrice ?? cfg.unit_price ?? 100),
     lastTitle: String(stateByDev[dev].lastTitle ?? cfg.title ?? 'Producto'),
@@ -436,6 +438,18 @@ function findDevByExternalRef(externalRef) {
 
   for (const dev of Object.keys(stateByDev)) {
     if (String(stateByDev[dev]?.expectedExtRef || '') === String(externalRef)) {
+      return dev;
+    }
+  }
+
+  return null;
+}
+
+function findDevByOrderId(orderId) {
+  if (!orderId) return null;
+
+  for (const dev of Object.keys(stateByDev)) {
+    if (String(stateByDev[dev]?.ultimaPreferencia || '') === String(orderId)) {
       return dev;
     }
   }
@@ -978,6 +992,11 @@ app.get('/nuevo-link', async (req, res) => {
     const priceChanged = (priceReq !== null && Number(st?.lastPrice) !== Number(priceReq));
 
     if (!force && st?.linkActual && st?.expectedExtRef && st?.ultimaPreferencia && !priceChanged && !titleChanged) {
+      if (st.qrRefreshEvent) {
+        st.qrRefreshEvent = null;
+        saveState(stateByDev);
+      }
+
       return res.json({
         dev,
         link: st.linkActual,
@@ -993,6 +1012,11 @@ app.get('/nuevo-link', async (req, res) => {
     if (!Number.isFinite(price) || price < 100 || price > 65000) price = undefined;
 
     const info = await generarNuevoLinkParaDev(dev, price, finalTitle);
+
+    if (stateByDev[dev]?.qrRefreshEvent) {
+      stateByDev[dev].qrRefreshEvent = null;
+      saveState(stateByDev);
+    }
 
     res.json({
       dev,
@@ -1020,7 +1044,11 @@ app.get('/estado', (req, res) => {
   }
 
   const st = stateByDev[dev];
-  res.json({ dev, paidEvent: st.paidEvent });
+  res.json({
+    dev,
+    paidEvent: st.paidEvent,
+    qrRefreshEvent: st.qrRefreshEvent || null
+  });
 });
 
 app.get('/ack', (req, res) => {
@@ -1197,6 +1225,7 @@ app.post('/admin/device/create', requireAdmin, async (req, res) => {
         expectedExtRef: null,
         ultimaPreferencia: null,
         linkActual: null,
+        qrRefreshEvent: null,
         rotateScheduled: false,
         lastPrice: unit_price,
         lastTitle: title,
@@ -1310,6 +1339,7 @@ app.post('/device/register', async (req, res) => {
       expectedExtRef: null,
       ultimaPreferencia: null,
       linkActual: null,
+      qrRefreshEvent: null,
       rotateScheduled: false,
       lastPrice: devicesData.devices[dev].unit_price,
       lastTitle: devicesData.devices[dev].title,
@@ -1369,6 +1399,7 @@ app.post('/device/config/update', (req, res) => {
         expectedExtRef: null,
         ultimaPreferencia: null,
         linkActual: null,
+        qrRefreshEvent: null,
         rotateScheduled: false,
         lastPrice: unit_price,
         lastTitle: title,
@@ -1492,6 +1523,7 @@ app.post('/admin/device/update', requireAdmin, (req, res) => {
         expectedExtRef: null,
         ultimaPreferencia: null,
         linkActual: null,
+        qrRefreshEvent: null,
         rotateScheduled: false,
         lastPrice: devicesData.devices[dev].unit_price,
         lastTitle: devicesData.devices[dev].title,
@@ -2536,6 +2568,7 @@ function registerPaidEventForDev(dev, payload) {
   st.expectedExtRef = null;
   st.ultimaPreferencia = null;
   st.linkActual = null;
+  st.qrRefreshEvent = null;
   st.rotateScheduled = false;
 
   saveState(stateByDev);
@@ -2582,6 +2615,52 @@ function registerPaidEventForDev(dev, payload) {
   return true;
 }
 
+
+function markQrExpiredForDev(dev, payload) {
+  const st = stateByDev[dev];
+  if (!st) return false;
+
+  const orderId = payload?.order_id ? String(payload.order_id) : '';
+  const externalRef = payload?.external_reference ? String(payload.external_reference) : '';
+
+  const okExt = !!(externalRef && String(st.expectedExtRef || '') === externalRef);
+  const okOrder = !!(orderId && String(st.ultimaPreferencia || '') === orderId);
+
+  if (!okExt && !okOrder) {
+    console.log('ℹ️ Expired recibido pero no corresponde al QR vigente:', {
+      dev,
+      externalRef,
+      expectedExtRef: st.expectedExtRef,
+      orderId,
+      ultimaPreferencia: st.ultimaPreferencia,
+    });
+    return false;
+  }
+
+  console.log(`⌛ QR expirado por Mercado Pago para ${dev}. Regenerando...`, {
+    orderId,
+    externalRef,
+  });
+
+  st.expectedExtRef = null;
+  st.ultimaPreferencia = null;
+  st.linkActual = null;
+  st.rotateScheduled = false;
+
+  st.qrRefreshEvent = {
+    reason: 'mp_order_expired',
+    at: Date.now(),
+    order_id: orderId || null,
+    external_reference: externalRef || null
+  };
+
+  saveState(stateByDev);
+
+  recargarLinkConReintento(dev, st.lastPrice, st.lastTitle);
+
+  return true;
+}
+
 app.post('/ipn', async (req, res) => {
   let processedKey = '';
 
@@ -2619,6 +2698,37 @@ app.post('/ipn', async (req, res) => {
       const orderStatusDetail = String(order.status_detail || '').trim().toLowerCase();
       const paymentStatus = String(payment?.status || '').trim().toLowerCase();
       const paymentStatusDetail = String(payment?.status_detail || '').trim().toLowerCase();
+
+      const expired = (
+        action === 'order.expired' ||
+        orderStatus === 'expired' ||
+        orderStatusDetail === 'expired' ||
+        paymentStatus === 'expired' ||
+        paymentStatusDetail === 'expired'
+      );
+
+      if (expired) {
+        const devByExtRef = findDevByExternalRef(externalRef);
+        const devByOrderId = findDevByOrderId(orderId);
+        const devFallback = (externalRef ? String(externalRef).split('_')[0] : '').toLowerCase();
+        const dev = (devByExtRef || devByOrderId || devFallback || '').toLowerCase();
+
+        if (isDeviceEnabled(dev)) {
+          markQrExpiredForDev(dev, {
+            order_id: orderId,
+            external_reference: externalRef,
+          });
+        } else {
+          console.log('ℹ️ Order expired para dev inválido/no encontrado:', {
+            dev,
+            externalRef,
+            orderId,
+          });
+        }
+
+        processedPayments.add(processedKey);
+        return res.sendStatus(200);
+      }
 
       const approved = (
         action === 'order.processed' ||
