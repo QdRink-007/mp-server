@@ -1,4 +1,4 @@
-// index.js – QdRink multi-BAR + OAuth Marketplace (PRODUCCION)
+// index.js – QdRink API Orders QR Interoperable V6.5 (expired polling + one-shot)
 // - OAuth connect por dev (bar4, bar5)
 // - Usa token del vendedor para crear QR interoperable con API Orders v1/orders
 // - Mantiene OAuth para futuro
@@ -417,6 +417,8 @@ getAllowedDevs().forEach((dev) => {
     rotateScheduled: false,
     lastPrice: Number(stateByDev[dev].lastPrice ?? cfg.unit_price ?? 100),
     lastTitle: String(stateByDev[dev].lastTitle ?? cfg.title ?? 'Producto'),
+    qrRefreshEvent: stateByDev[dev].qrRefreshEvent ?? null,
+    lastOrderCheckAt: stateByDev[dev].lastOrderCheckAt ?? 0,
   };
 });
 
@@ -1037,18 +1039,30 @@ app.get('/nuevo-link', async (req, res) => {
   }
 });
 
-app.get('/estado', (req, res) => {
-  const dev = (req.query.dev || '').toLowerCase();
-  if (!isDeviceEnabled(dev)) {
-    return res.status(400).json({ error: 'dev invalido' });
-  }
+app.get('/estado', async (req, res) => {
+  try {
+    const dev = (req.query.dev || '').toLowerCase();
+    if (!isDeviceEnabled(dev)) {
+      return res.status(400).json({ error: 'dev invalido' });
+    }
 
-  const st = stateByDev[dev];
-  res.json({
-    dev,
-    paidEvent: st.paidEvent,
-    qrRefreshEvent: st.qrRefreshEvent || null
-  });
+    const st = stateByDev[dev];
+
+    // ✅ V6.5: además del webhook order.expired, consultamos MP cada X segundos
+    // para detectar si la orden vigente ya expiró aunque no haya llegado webhook.
+    if (!st.paidEvent && !st.qrRefreshEvent) {
+      await revisarOrdenVigenteParaDev(dev);
+    }
+
+    return res.json({
+      dev,
+      paidEvent: stateByDev[dev]?.paidEvent || null,
+      qrRefreshEvent: stateByDev[dev]?.qrRefreshEvent || null
+    });
+  } catch (e) {
+    console.error('❌ Error en /estado:', e.response?.data || e.message);
+    return res.status(500).json({ error: 'estado_error' });
+  }
 });
 
 app.get('/ack', (req, res) => {
@@ -2531,6 +2545,80 @@ async function fetchPaymentWithToken(paymentId, token) {
   return axios.get(url, { headers });
 }
 
+async function fetchOrderWithToken(orderId, token) {
+  const headers = { Authorization: `Bearer ${token}` };
+  const url = `https://api.mercadopago.com/v1/orders/${orderId}`;
+  return axios.get(url, { headers });
+}
+
+function orderLooksExpired(orderData) {
+  const order = orderData || {};
+  const payment = Array.isArray(order?.transactions?.payments) ? (order.transactions.payments[0] || null) : null;
+
+  const orderStatus = String(order.status || '').trim().toLowerCase();
+  const orderStatusDetail = String(order.status_detail || '').trim().toLowerCase();
+  const paymentStatus = String(payment?.status || '').trim().toLowerCase();
+  const paymentStatusDetail = String(payment?.status_detail || '').trim().toLowerCase();
+
+  return (
+    orderStatus === 'expired' ||
+    orderStatusDetail === 'expired' ||
+    paymentStatus === 'expired' ||
+    paymentStatusDetail === 'expired' ||
+    orderStatus === 'cancelled' ||
+    orderStatus === 'canceled' ||
+    orderStatus === 'closed'
+  );
+}
+
+async function revisarOrdenVigenteParaDev(dev) {
+  const st = stateByDev[dev];
+  if (!st || st.paidEvent || st.qrRefreshEvent) return false;
+  if (!st.ultimaPreferencia || !st.expectedExtRef || !st.linkActual) return false;
+
+  const now = Date.now();
+  const CHECK_EVERY_MS = Number(process.env.ORDER_STATUS_CHECK_MS || 30000);
+  if (st.lastOrderCheckAt && (now - Number(st.lastOrderCheckAt)) < CHECK_EVERY_MS) {
+    return false;
+  }
+
+  st.lastOrderCheckAt = now;
+  saveState(stateByDev);
+
+  const token = await getAccessTokenForDev(dev);
+  if (!token) {
+    console.log(`⚠️ No hay token para revisar orden vigente de ${dev}`);
+    return false;
+  }
+
+  try {
+    const orderRes = await fetchOrderWithToken(st.ultimaPreferencia, token);
+    const order = orderRes.data || {};
+
+    if (orderLooksExpired(order)) {
+      markQrExpiredForDev(dev, {
+        order_id: st.ultimaPreferencia,
+        external_reference: order.external_reference || st.expectedExtRef,
+      });
+      return true;
+    }
+  } catch (e) {
+    const status = e.response?.status;
+    const data = e.response?.data;
+    console.log(`⚠️ No pude consultar orden ${st.ultimaPreferencia} para ${dev}:`, data || e.message);
+
+    if (status === 404) {
+      markQrExpiredForDev(dev, {
+        order_id: st.ultimaPreferencia,
+        external_reference: st.expectedExtRef,
+      });
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function buildProcessedKey(prefix, id) {
   return `${prefix}:${String(id || '').trim()}`;
 }
@@ -2924,6 +3012,7 @@ app.post('/ipn', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Servidor activo en http://localhost:${PORT}`);
+  console.log('V6.5: QR one-shot + refresh por order.expired/webhook + polling de /estado');
   console.log('Generando QRs interoperables iniciales por dev...');
 
   getAllowedDevs().forEach((dev) => {
