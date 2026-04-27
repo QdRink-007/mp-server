@@ -1375,6 +1375,71 @@ app.post('/device/register', async (req, res) => {
   }
 });
 
+app.post('/device/unregister', (req, res) => {
+  try {
+    const dev = String(req.body.dev || '').trim().toLowerCase();
+    const device_key = String(req.body.device_key || '').trim();
+
+    if (!/^[a-z0-9_-]{3,40}$/.test(dev)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'dev invalido',
+        code: 'invalid_dev'
+      });
+    }
+
+    if (!device_key || device_key.length < 8) {
+      return res.status(400).json({
+        ok: false,
+        error: 'device_key requerida',
+        code: 'device_key_required'
+      });
+    }
+
+    const current = getDevice(dev);
+
+    // Si ya no existe, lo damos por OK.
+    // Así el ESP puede completar el reset aunque ya lo hayas borrado desde el panel.
+    if (!current) {
+      return res.json({
+        ok: true,
+        dev,
+        already_deleted: true
+      });
+    }
+
+    // Seguridad: solo el equipo que tiene la device_key correcta puede borrarse a sí mismo.
+    if (String(current.device_key || '') !== device_key) {
+      return res.status(403).json({
+        ok: false,
+        error: 'device_key invalida',
+        code: 'invalid_device_key'
+      });
+    }
+
+    delete devicesData.devices[dev];
+    saveDevices(devicesData);
+
+    if (stateByDev[dev]) {
+      delete stateByDev[dev];
+      saveState(stateByDev);
+    }
+
+    console.log(`🗑️ Device desvinculado por reset general: ${dev}`);
+
+    res.json({
+      ok: true,
+      dev
+    });
+  } catch (e) {
+    console.error('❌ Error en /device/unregister:', e.message);
+    res.status(500).json({
+      ok: false,
+      error: e.message
+    });
+  }
+});
+
 app.post('/device/config/update', (req, res) => {
   try {
     const dev = String(req.body.dev || '').trim().toLowerCase();
