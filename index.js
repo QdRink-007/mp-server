@@ -1,4 +1,4 @@
-// index.js – QdRink API Orders QR Interoperable V6.5 (expired polling + one-shot)
+// index.js – QCORE API Orders QR Interoperable V7
 // - OAuth connect por dev (bar4, bar5)
 // - Usa token del vendedor para crear QR interoperable con API Orders v1/orders
 // - Mantiene OAuth para futuro
@@ -431,6 +431,28 @@ const processingPayments = new Set();
 
 // ================== HELPERS ==================
 
+function onlyAlphaNumLower(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function buildDevFromClientAndName(client_id, rawDevOrSuffix) {
+  const prefix = onlyAlphaNumLower(client_id);
+  const name = onlyAlphaNumLower(rawDevOrSuffix);
+
+  if (!prefix || !name) return '';
+
+  // Si por error ya mandan el dev completo, no lo duplica.
+  // Ej: client_id=37307878 y dev=37307878canilla1 => queda igual.
+  if (name.startsWith(prefix)) return name;
+
+  // Caso normal:
+  // client_id=37307878 + dev=canilla1 => 37307878canilla1
+  return `${prefix}${name}`;
+}
+
 function buildUniqueExtRef(dev) {
   return `${String(dev || '').toLowerCase()}_${Date.now()}`;
 }
@@ -717,9 +739,34 @@ function validateMpPosExternalIdOrThrow(externalId) {
   }
 }
 
+function normalizeDeviceKind(kindRaw) {
+  let kind = String(kindRaw || 'beer_tap').trim().toLowerCase();
+
+  if (kind === 'beertap') kind = 'beer_tap';
+  if (kind === 'tiket') kind = 'ticket';
+
+  return kind;
+}
+
+function deviceTitleFromKind(kindRaw) {
+  const kind = normalizeDeviceKind(kindRaw);
+
+  if (kind === 'ticket') return 'Qtiket';
+  if (kind === 'unit') return 'Unit';
+  return 'QdRink';
+}
+
+function validateDeviceKind(kind) {
+  return ['beer_tap', 'ticket', 'unit', 'generic'].includes(normalizeDeviceKind(kind));
+}
+
 function buildPosDisplayName(kind, title, dev) {
-  const basePrefix = String(kind || '').trim() === 'ticket' ? 'QTIKET' : 'QDRINK';
-  const rawTitle = String(title || '').trim().toUpperCase();
+  const k = normalizeDeviceKind(kind);
+
+  let basePrefix = 'QDRINK';
+  if (k === 'ticket') basePrefix = 'QTIKET';
+  if (k === 'unit') basePrefix = 'UNIT';
+
   const rawDev = String(dev || '').trim().toUpperCase();
   let name = `${basePrefix} ${rawDev}`.trim();
 
@@ -1145,8 +1192,9 @@ app.get('/admin/devices', requireAdmin, (req, res) => {
 
 app.post('/admin/device/create', requireAdmin, async (req, res) => {
   try {
-    const dev = String(req.body.dev || '').trim().toLowerCase();
     const client_id = String(req.body.client_id || '').trim();
+    const devInput = String(req.body.dev_suffix ?? req.body.dev ?? '').trim();
+    const dev = buildDevFromClientAndName(client_id, devInput);
     const title = String(req.body.title || '').trim();
     const quantity = Number(req.body.quantity || 1);
     const currency_id = String(req.body.currency_id || 'ARS').trim().toUpperCase();
@@ -1154,10 +1202,13 @@ app.post('/admin/device/create', requireAdmin, async (req, res) => {
     const fee_pct = Number(req.body.fee_pct || 0);
     const token_mode = String(req.body.token_mode || '').trim();
     const enabled = req.body.enabled === false ? false : true;
-    const kind = String(req.body.kind || 'generic').trim();
+    const kind = normalizeDeviceKind(req.body.kind || 'generic');
+    const local_name = String(req.body.local_name || '').trim();
 
-    if (!/^[a-z0-9_-]{3,40}$/.test(dev)) {
-      return res.status(400).json({ error: 'dev invalido (3..40, a-z0-9_-)' });
+    if (!/^[a-z0-9]{3,40}$/.test(dev)) {
+      return res.status(400).json({
+        error: 'dev invalido: se arma como client_id + nombre equipo, solo letras y numeros, 3..40 caracteres'
+     });
     }
 
     if (!client_id || client_id.length < 2 || client_id.length > 60) {
@@ -1188,6 +1239,14 @@ app.post('/admin/device/create', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: 'token_mode invalido' });
     }
 
+    if (!validateDeviceKind(kind)) {
+      return res.status(400).json({ error: 'kind invalido' });
+    }
+
+    if (local_name && local_name.length > 80) {
+      return res.status(400).json({ error: 'local_name invalido' });
+    }
+
     const devices = getDevices();
 
     if (devices[dev]) {
@@ -1198,6 +1257,8 @@ app.post('/admin/device/create', requireAdmin, async (req, res) => {
     if (!client) {
       return res.status(404).json({ error: 'cliente inexistente' });
     }
+
+    const finalLocalName = local_name || String(client.display_name || client_id).trim();
 
     const posInfo = await createPosForNewDevice({
       dev,
@@ -1221,6 +1282,7 @@ app.post('/admin/device/create', requireAdmin, async (req, res) => {
       token_mode,
       enabled,
       kind,
+      local_name: finalLocalName,
       device_key,
       mp_pos_id: posInfo.id,
       mp_external_pos_id: posInfo.external_id,
@@ -1264,20 +1326,33 @@ app.post('/admin/device/create', requireAdmin, async (req, res) => {
 app.post('/device/register', async (req, res) => {
   try {
     const client_id = String(req.body.client_id || '').trim();
-    const dev = String(req.body.dev || '').trim().toLowerCase();
+    const devInput = String(req.body.dev_suffix ?? req.body.dev ?? '').trim();
+    const dev = buildDevFromClientAndName(client_id, devInput);
     const ap_password = String(req.body.ap_password || '').trim();
-    const kind = String(req.body.kind || 'beer_tap').trim();
+    const kind = normalizeDeviceKind(req.body.kind || 'beer_tap');
+    const local_name = String(req.body.local_name || '').trim();
 
     if (!client_id) {
       return res.status(400).json({ error: 'client_id requerido' });
     }
 
-    if (!/^[a-z0-9_-]{3,40}$/.test(dev)) {
-      return res.status(400).json({ error: 'dev invalido (3..40, a-z0-9_-)' });
+    if (!/^[a-z0-9]{3,40}$/.test(dev)) {
+      return res.status(400).json({
+        error: 'dev invalido: se arma como client_id + nombre equipo, solo letras y numeros, 3..40 caracteres',
+        code: 'invalid_dev'
+      });
     }
 
     if (ap_password.length < 8 || ap_password.length > 63) {
       return res.status(400).json({ error: 'ap_password invalida (8..63)' });
+    }
+
+    if (!validateDeviceKind(kind) || kind === 'generic') {
+      return res.status(400).json({ error: 'kind invalido', code: 'invalid_kind' });
+    }
+
+    if (local_name && local_name.length > 80) {
+      return res.status(400).json({ error: 'local_name invalido', code: 'invalid_local_name' });
     }
 
     const client = getClient(client_id);
@@ -1308,6 +1383,7 @@ app.post('/device/register', async (req, res) => {
     }
 
     const defaultFee = Number(client.default_fee_pct || 0);
+    const finalLocalName = local_name || String(client.display_name || client_id).trim();
 
     // V6.2:
     // En el alta desde equipo virgen usamos siempre la cuenta principal para poder
@@ -1318,7 +1394,7 @@ app.post('/device/register', async (req, res) => {
     const device_key =
       'dk_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
 
-    const deviceTitle = kind === 'ticket' ? 'Qtiket' : 'QdRink';
+    const deviceTitle = deviceTitleFromKind(kind);
 
     const posInfo = await createPosForNewDevice({
       dev,
@@ -1338,6 +1414,7 @@ app.post('/device/register', async (req, res) => {
       token_mode: inferredTokenMode,
       enabled: true,
       kind,
+      local_name: finalLocalName,
       device_key,
       mp_pos_id: posInfo.id,
       mp_external_pos_id: posInfo.external_id,
@@ -1366,7 +1443,8 @@ app.post('/device/register', async (req, res) => {
       dev,
       device_key,
       ap_password,
-      kind
+      kind,
+      local_name: finalLocalName
     });
   } catch (e) {
     const mpError = e.response?.data || null;
@@ -1380,7 +1458,7 @@ app.post('/device/unregister', (req, res) => {
     const dev = String(req.body.dev || '').trim().toLowerCase();
     const device_key = String(req.body.device_key || '').trim();
 
-    if (!/^[a-z0-9_-]{3,40}$/.test(dev)) {
+    if (!/^[a-z0-9]{3,40}$/.test(dev)) {
       return res.status(400).json({
         ok: false,
         error: 'dev invalido',
@@ -1446,6 +1524,7 @@ app.post('/device/config/update', (req, res) => {
     const device_key = String(req.body.device_key || '').trim();
     const title = String(req.body.title || '').trim();
     const unit_price = Number(req.body.unit_price);
+    const local_name = String(req.body.local_name || '').trim();
 
     if (!dev) {
       return res.status(400).json({ error: 'dev requerido' });
@@ -1468,8 +1547,13 @@ app.post('/device/config/update', (req, res) => {
       return res.status(400).json({ error: 'unit_price invalido' });
     }
 
+    if (req.body.local_name !== undefined && local_name.length > 80) {
+      return res.status(400).json({ error: 'local_name invalido' });
+    }
+
     devicesData.devices[dev].title = title;
     devicesData.devices[dev].unit_price = unit_price;
+    if (req.body.local_name !== undefined) devicesData.devices[dev].local_name = local_name;
     saveDevices(devicesData);
 
     if (!stateByDev[dev]) {
@@ -1533,6 +1617,14 @@ app.post('/admin/device/update', requireAdmin, (req, res) => {
       patch.title = title;
     }
 
+    if (req.body.local_name !== undefined) {
+      const local_name = String(req.body.local_name || '').trim();
+      if (local_name.length > 80) {
+        return res.status(400).json({ error: 'local_name invalido' });
+      }
+      patch.local_name = local_name;
+    }
+
     if (req.body.quantity !== undefined) {
       const quantity = Number(req.body.quantity);
       if (!Number.isFinite(quantity) || quantity < 1 || quantity > 100) {
@@ -1578,7 +1670,11 @@ app.post('/admin/device/update', requireAdmin, (req, res) => {
     }
 
     if (req.body.kind !== undefined) {
-      patch.kind = String(req.body.kind || 'generic').trim();
+      const kind = normalizeDeviceKind(req.body.kind || 'generic');
+      if (!validateDeviceKind(kind)) {
+        return res.status(400).json({ error: 'kind invalido' });
+      }
+      patch.kind = kind;
     }
 
     if (req.body.device_key !== undefined) {
@@ -1919,6 +2015,7 @@ app.get('/panel', requireAdmin, (req, res) => {
       <tr>
         <td>${escapeHtml(dev)}</td>
         <td>${escapeHtml(String(d.client_id || ''))}</td>
+        <td>${escapeHtml(String(d.local_name || ''))}</td>
         <td>${escapeHtml(String(d.title || ''))}</td>
         <td>${escapeHtml(String(d.unit_price || ''))}</td>
         <td>${escapeHtml(String(st.lastPrice || d.unit_price || ''))}</td>
@@ -1956,7 +2053,7 @@ app.get('/panel', requireAdmin, (req, res) => {
         <td>${oauthConnected ? 'sí' : 'no'}</td>
         <td>${escapeHtml(String(tok?.user_id || ''))}</td>
         <td>${escapeHtml(String(oauthUpdated || ''))}</td>
-        <td><a href="/connect?client_id=${encodeURIComponent(client_id)}&key=${encodeURIComponent(ADMIN_KEY)}">Conectar MP</a></td>
+        <td><a href="/connect?client_id=${encodeURIComponent(client_id)}">Conectar MP</a></td>
         <td><button type="button" onclick="deleteClient('${escapeHtml(client_id)}')">Eliminar</button></td>
       </tr>
     `;
@@ -2004,7 +2101,7 @@ app.get('/panel', requireAdmin, (req, res) => {
       <ul>
         ${clientsEntries
           .filter(([client_id]) => devicesEntries.some(([, d]) => d?.client_id === client_id && d?.enabled === true && d?.token_mode === 'oauth_seller'))
-          .map(([client_id, cfg]) => `<li><a href="/connect?client_id=${encodeURIComponent(client_id)}&key=${encodeURIComponent(ADMIN_KEY)}">/connect?client_id=${escapeHtml(client_id)}</a> <span class="muted">(${escapeHtml(String(cfg.display_name || ''))})</span></li>`)
+          .map(([client_id, cfg]) => `<li><a href="/connect?client_id=${encodeURIComponent(client_id)}">/connect?client_id=${escapeHtml(client_id)}</a> <span class="muted">(${escapeHtml(String(cfg.display_name || ''))})</span></li>`)
           .join('') || '<li class="muted">No hay clientes con devices oauth_seller habilitados.</li>'}
       </ul>
     </div>
@@ -2125,13 +2222,19 @@ app.get('/panel', requireAdmin, (req, res) => {
         <h3>Crear device</h3>
         <form onsubmit="return createDevice(event)">
           <div style="margin:6px 0;">
-            <label>Dev:</label><br/>
-            <input name="dev" style="width:220px;" placeholder="canilla01" />
+            <label>Nombre equipo:</label><br/>
+            <input name="dev" style="width:220px;" placeholder="canilla1" />
+            <div class="muted">El dev final será: client_id + nombre equipo</div>
           </div>
 
           <div style="margin:6px 0;">
             <label>Cliente ID:</label><br/>
             <input name="client_id" style="width:220px;" placeholder="cliente01" />
+          </div>
+
+          <div style="margin:6px 0;">
+            <label>Nombre local:</label><br/>
+            <input name="local_name" style="width:320px;" placeholder="Nombre local" />
           </div>
 
           <div style="margin:6px 0;">
@@ -2162,6 +2265,7 @@ app.get('/panel', requireAdmin, (req, res) => {
             <select name="kind" style="width:220px;">
                 <option value="beer_tap">beer_tap</option>
                 <option value="ticket">ticket</option>
+                <option value="unit">unit</option>
               </select>
             </div>
 
@@ -2174,13 +2278,19 @@ app.get('/panel', requireAdmin, (req, res) => {
         <h3>Editar device</h3>
         <form onsubmit="return updateDevice(event)">
           <div style="margin:6px 0;">
-            <label>Dev:</label><br/>
-            <input name="dev" style="width:220px;" placeholder="canilla01" />
+            <label>Dev final existente:</label><br/>
+            <input name="dev" style="width:220px;" placeholder="37307878canilla1" />
+            <div class="muted">Para editar, usar el dev final ya creado.</div>
           </div>
 
           <div style="margin:6px 0;">
             <label>Cliente ID:</label><br/>
             <input name="client_id" style="width:220px;" placeholder="cliente01" />
+          </div>
+
+          <div style="margin:6px 0;">
+            <label>Nombre local:</label><br/>
+            <input name="local_name" style="width:320px;" placeholder="Nombre local" />
           </div>
 
           <div style="margin:6px 0;">
@@ -2213,6 +2323,7 @@ app.get('/panel', requireAdmin, (req, res) => {
               <option value="">(sin cambio)</option>
               <option value="beer_tap">beer_tap</option>
               <option value="ticket">ticket</option>
+              <option value="unit">unit</option>
             </select>
           </div>
 
@@ -2241,8 +2352,9 @@ app.get('/panel', requireAdmin, (req, res) => {
         </div>
 
         <div style="margin:6px 0;">
-          <label>Dev:</label><br/>
-          <input name="dev" style="width:220px;" placeholder="canilla01" />
+          <label>Nombre equipo:</label><br/>
+          <input name="dev" style="width:220px;" placeholder="canilla1" />
+          <div class="muted">El dev final será: client_id + nombre equipo</div>
         </div>
 
         <div style="margin:6px 0;">
@@ -2251,10 +2363,16 @@ app.get('/panel', requireAdmin, (req, res) => {
         </div>
 
         <div style="margin:6px 0;">
+          <label>Nombre local:</label><br/>
+          <input name="local_name" style="width:320px;" placeholder="Nombre local" />
+        </div>
+
+        <div style="margin:6px 0;">
           <label>Kind:</label><br/>
           <select name="kind" style="width:220px;">
             <option value="beer_tap">beer_tap</option>
             <option value="ticket">ticket</option>
+            <option value="unit">unit</option>
           </select>
         </div>
 
@@ -2293,6 +2411,7 @@ app.get('/panel', requireAdmin, (req, res) => {
         <tr>
           <th>Dev</th>
           <th>Cliente</th>
+          <th>Local</th>
           <th>Título</th>
           <th>Precio base</th>
           <th>Último precio</th>
@@ -2303,7 +2422,7 @@ app.get('/panel', requireAdmin, (req, res) => {
           <th>OAuth cliente</th>
           <th>Acción</th>
         </tr>
-        ${devicesTableRows || '<tr><td colspan="11" class="muted">No hay devices cargados.</td></tr>'}
+        ${devicesTableRows || '<tr><td colspan="12" class="muted">No hay devices cargados.</td></tr>'}
       </table>
       <div class="muted" id="deleteDeviceResp" style="margin-top:6px;"></div>
     </div>
@@ -2388,6 +2507,7 @@ app.get('/panel', requireAdmin, (req, res) => {
         const body = {
           dev: String(fd.get('dev') || '').trim(),
           client_id: String(fd.get('client_id') || '').trim(),
+          local_name: String(fd.get('local_name') || '').trim(),
           title: String(fd.get('title') || '').trim(),
           quantity: 1,
           currency_id: 'ARS',
@@ -2424,6 +2544,7 @@ app.get('/panel', requireAdmin, (req, res) => {
         };
 
         const client_id = String(fd.get('client_id') || '').trim();
+        const local_name = String(fd.get('local_name') || '').trim();
         const title = String(fd.get('title') || '').trim();
         const unit_price_raw = String(fd.get('unit_price') || '').trim();
         const fee_pct_raw = String(fd.get('fee_pct') || '').trim();
@@ -2432,6 +2553,7 @@ app.get('/panel', requireAdmin, (req, res) => {
         const enabled_raw = String(fd.get('enabled') || '').trim();
 
         if (client_id) body.client_id = client_id;
+        if (local_name) body.local_name = local_name;
         if (title) body.title = title;
         if (unit_price_raw) body.unit_price = Number(unit_price_raw);
         if (fee_pct_raw) body.fee_pct = Number(fee_pct_raw);
@@ -2576,6 +2698,7 @@ app.get('/panel', requireAdmin, (req, res) => {
           client_id: String(fd.get('client_id') || '').trim(),
           dev: String(fd.get('dev') || '').trim(),
           ap_password: String(fd.get('ap_password') || '').trim(),
+          local_name: String(fd.get('local_name') || '').trim(),
           kind: String(fd.get('kind') || 'beer_tap').trim()
         };
 
@@ -3077,7 +3200,7 @@ app.post('/ipn', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Servidor activo en http://localhost:${PORT}`);
-  console.log('V6.5: QR one-shot + refresh por order.expired/webhook + polling de /estado');
+  console.log('V7: QCORE multi-kind + QR one-shot + refresh por order.expired/webhook + polling de /estado');
   console.log('Generando QRs interoperables iniciales por dev...');
 
   getAllowedDevs().forEach((dev) => {
